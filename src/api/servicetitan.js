@@ -1,5 +1,5 @@
 const { getSecrets } = require('../utils/secrets');
-const { Interval, DateTime } = require('luxon');
+const { DateTime } = require('luxon');
 
 let accessTokenCache = {
     token: null,
@@ -88,19 +88,52 @@ async function stApiRequest(endpoint, options = {}) {
         },
     };
 
-    try {
-        const response = await fetch(`${baseUrl}${endpoint}`, config);
+    let lastError;
+    const maxAttempts = 4;
 
-        if (!response.ok) {
-            const errorBody = await response.text();
-            throw new Error(`ServiceTitan API Error: ${response.status} ${response.statusText} - ${errorBody}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const response = await fetch(`${baseUrl}${endpoint}`, config);
+
+            if (response.status === 429 || response.status >= 500) {
+                const retryBody = await response.text();
+                lastError = new Error(`ServiceTitan API retryable error ${response.status}: ${retryBody}`);
+                if (attempt < maxAttempts) {
+                    await wait(getBackoffMs(attempt));
+                    continue;
+                }
+            }
+
+            if (!response.ok) {
+                const errorBody = await response.text();
+                throw new Error(`ServiceTitan API Error: ${response.status} ${response.statusText} - ${errorBody}`);
+            }
+
+            if (response.status === 204) {
+                return null;
+            }
+
+            return response.json();
+        } catch (error) {
+            lastError = error;
+            if (attempt < maxAttempts) {
+                await wait(getBackoffMs(attempt));
+                continue;
+            }
         }
-
-        return response.json();
-    } catch (error) {
-        console.error(`Error calling ServiceTitan API endpoint ${endpoint}:`, error);
-        throw error;
     }
+
+    console.error(`Error calling ServiceTitan API endpoint ${endpoint}:`, lastError);
+    throw lastError;
+}
+
+function getBackoffMs(attempt) {
+    const jitter = Math.floor(Math.random() * 100);
+    return Math.min(5000, 250 * (2 ** (attempt - 1)) + jitter);
+}
+
+function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**

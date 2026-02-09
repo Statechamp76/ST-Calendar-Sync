@@ -22,6 +22,11 @@ app.post('/graph/notifications', async (req, res) => {
     // A robust implementation would verify the origin of the request (e.g., using clientState)
     // and handle decryption of encrypted notifications if configured.
     try {
+        if (!req.body || !Array.isArray(req.body.value)) {
+            res.status(400).send('Bad Request: Invalid notification payload.');
+            return;
+        }
+
         const pubsub = new PubSub();
         const topicName = 'graph-notifications'; // Ensure this topic exists in GCP
 

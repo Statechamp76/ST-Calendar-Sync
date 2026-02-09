@@ -1,255 +1,237 @@
+const { PubSub } = require('@google-cloud/pubsub');
 const graph = require('../api/graph');
 const servicetitan = require('../api/servicetitan');
 const sheets = require('./sheets');
-const { splitMultiDayEvent, TIMEZONE } = require('../utils/time');
 const { getSecrets } = require('../utils/secrets');
-const crypto = require('crypto');
-const { DateTime, Duration, Interval } = require('luxon');
-const { PubSub } = require('@google-cloud/pubsub');
+const { normalizeGraphEvent, getEventDedupeKey } = require('../utils/normalize');
+const { mapEventToServiceTitanPayloads } = require('./mapping');
+const { loadConfig } = require('../config');
 
-/**
- * Generates a hash for an Outlook event based on its significant properties.
- * This hash is used to detect changes and ensure idempotency.
- * @param {object} event - The Outlook event object.
- * @returns {string} MD5 hash of the event's relevant data.
- */
-function generateEventHash(event) {
-    const data = {
-        subject: event.subject,
-        start: event.start.dateTime,
-        end: event.end.dateTime,
-        showAs: event.showAs,
-        isPrivate: event.isPrivate,
-        location: event.location ? event.location.displayName : '',
-        body: event.body ? event.body.content : '',
-        // Add other fields that, if changed, should trigger a ServiceTitan update
-    };
-    return crypto.createHash('md5').update(JSON.stringify(data)).digest('hex');
+const config = loadConfig();
+
+function createSummary() {
+  return {
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    calendarsProcessed: 0,
+    eventsFetched: 0,
+    eventsUpserted: 0,
+    eventsSkipped: 0,
+    errors: [],
+  };
 }
 
-/**
- * Runs a delta synchronization for a single user's mailbox.
- * This is the core worker function called by the Pub/Sub subscriber.
- * @param {string} userUpn - The User Principal Name (email) of the user to sync.
- */
-async function runDeltaSyncForUser(userUpn) {
-    console.log(`Starting delta sync for user: ${userUpn}`);
+function parseJsonArray(value) {
+  if (!value) {
+    return [];
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return [];
+  }
+}
 
-    // 1. Get user configuration from TechMap
-    const techMap = await sheets.getTechMap();
-    const userConfig = techMap.find(u => u.outlook_upn === userUpn);
+async function upsertServiceTitanAppointments(userConfig, event, existingMapping) {
+  const payloads = mapEventToServiceTitanPayloads(event, userConfig);
+  const previousIds = existingMapping ? parseJsonArray(existingMapping.st_nonjob_ids_json) : [];
+  const currentIds = [];
 
-    if (!userConfig || !userConfig.enabled) {
-        console.log(`User ${userUpn} not found or not enabled in TechMap. Skipping sync.`);
-        return;
+  for (let index = 0; index < payloads.length; index += 1) {
+    const payload = payloads[index];
+    let appointmentId = previousIds[index];
+
+    if (appointmentId) {
+      try {
+        await servicetitan.updateNonJob(appointmentId, payload);
+      } catch (error) {
+        appointmentId = await servicetitan.createNonJob(payload);
+      }
+    } else {
+      appointmentId = await servicetitan.createNonJob(payload);
     }
 
-    // 2. Get deltaLink for this user
-    let deltaState = await sheets.getDeltaState(userUpn);
-    const initialDeltaLink = deltaState.delta_link;
-    console.log(`Using deltaLink for ${userUpn}: ${initialDeltaLink || 'None (initial sync)'}`);
+    currentIds.push(appointmentId);
+  }
 
-    // 3. Fetch changes from Microsoft Graph
-    let graphResponse;
+  for (let index = payloads.length; index < previousIds.length; index += 1) {
+    await servicetitan.deleteNonJob(previousIds[index]);
+  }
+
+  return currentIds;
+}
+
+async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
+  const existingMapping = await sheets.findEventMapping(userConfig.outlook_upn, normalizedEvent.id);
+  const dedupeKey = getEventDedupeKey(normalizedEvent);
+
+  if (!normalizedEvent.start || !normalizedEvent.end) {
+    summary.eventsSkipped += 1;
+    return;
+  }
+
+  if (normalizedEvent.showAs === 'free') {
+    if (existingMapping) {
+      const existingIds = parseJsonArray(existingMapping.st_nonjob_ids_json);
+      for (const appointmentId of existingIds) {
+        await servicetitan.deleteNonJob(appointmentId);
+      }
+      await sheets.deleteEventMapping(userConfig.outlook_upn, normalizedEvent.id);
+    }
+    summary.eventsSkipped += 1;
+    return;
+  }
+
+  if (existingMapping && existingMapping.last_hash === dedupeKey) {
+    summary.eventsSkipped += 1;
+    return;
+  }
+
+  const appointmentIds = await upsertServiceTitanAppointments(userConfig, normalizedEvent, existingMapping);
+  await sheets.updateEventMapping(
+    userConfig.outlook_upn,
+    normalizedEvent.id,
+    appointmentIds,
+    dedupeKey,
+    'SYNCED',
+    existingMapping ? existingMapping.rowIndex : null,
+  );
+  summary.eventsUpserted += 1;
+}
+
+async function processUserEvents(userConfig, rawEvents, summary) {
+  const seen = new Set();
+  const normalizedEvents = rawEvents.map(normalizeGraphEvent).filter((event) => Boolean(event.id));
+
+  for (const event of normalizedEvents) {
+    const dedupeKey = getEventDedupeKey(event);
+    if (seen.has(dedupeKey)) {
+      summary.eventsSkipped += 1;
+      continue;
+    }
+    seen.add(dedupeKey);
+
     try {
-        graphResponse = await graph.getDeltaEvents(userUpn, initialDeltaLink);
+      await processNormalizedEvent(userConfig, event, summary);
     } catch (error) {
-        console.error(`Error fetching delta events for ${userUpn}:`, error);
-        // If initial sync fails due to bad delta link, try a full initial sync (without delta link)
-        if (initialDeltaLink && error.message.includes('DeltaTokenNotFind') || error.message.includes('ResyncRequired')) {
-            console.warn(`Delta link invalid for ${userUpn}. Attempting full initial sync.`);
-            graphResponse = await graph.getDeltaEvents(userUpn, null);
-        } else {
-            throw error; // Re-throw if it's a different error
-        }
+      summary.errors.push({
+        userUpn: userConfig.outlook_upn,
+        eventId: event.id,
+        message: error.message,
+      });
     }
-    
-    const { events, nextDeltaLink } = graphResponse;
-    console.log(`Received ${events.length} events from Graph for ${userUpn}.`);
-
-    for (const event of events) {
-        const outlookEventId = event.id;
-        const existingMapping = await sheets.findEventMapping(userUpn, outlookEventId);
-        
-        if (event['@removed']) {
-            // --- Handle Deletion ---
-            console.log(`Outlook event ${outlookEventId} for ${userUpn} was removed.`);
-            if (existingMapping) {
-                const stNonJobIds = JSON.parse(existingMapping.st_nonjob_ids_json || '[]');
-                for (const stId of stNonJobIds) {
-                    try {
-                        await servicetitan.deleteNonJob(stId);
-                        console.log(`Deleted ServiceTitan non-job ${stId} for event ${outlookEventId}.`);
-                    } catch (delError) {
-                        console.error(`Failed to delete ST non-job ${stId} for ${outlookEventId}:`, delError);
-                    }
-                }
-                await sheets.deleteEventMapping(userUpn, outlookEventId); // Mark as deleted in sheets
-            } else {
-                console.log(`No existing mapping for removed event ${outlookEventId}. Skipping delete.`);
-            }
-            continue; // Move to next event
-        }
-
-        // --- Filter Events for Sync ---
-        // Ignore events where showAs = free. If it was previously synced, it needs to be deleted.
-        if (event.showAs === 'free') {
-             console.log(`Outlook event ${outlookEventId} for ${userUpn} is 'free'.`);
-             if (existingMapping) {
-                 console.log(`Event ${outlookEventId} was previously synced. Deleting ST non-jobs.`);
-                 const stNonJobIds = JSON.parse(existingMapping.st_nonjob_ids_json || '[]');
-                 for (const stId of stNonJobIds) {
-                     try {
-                         await servicetitan.deleteNonJob(stId);
-                     } catch (delError) {
-                         console.error(`Failed to delete ST non-job ${stId} for event ${outlookEventId}:`, delError);
-                     }
-                 }
-                 await sheets.deleteEventMapping(userUpn, outlookEventId);
-             }
-             continue; // Move to next event
-        }
-        
-        // --- Process Create/Update ---
-        const currentEventHash = generateEventHash(event);
-        if (existingMapping && existingMapping.last_hash === currentEventHash) {
-            console.log(`Event ${outlookEventId} for ${userUpn} is unchanged (hash match). Skipping update.`);
-            continue;
-        }
-
-        console.log(`Processing update/create for Outlook event ${outlookEventId} for ${userUpn}.`);
-
-        // Determine ServiceTitan appointment name
-        const stAppointmentName = event.isPrivate ? "Busy" : (event.subject || "Calendar Event");
-
-        // Split multi-day events into single-day blocks
-        const eventBlocks = splitMultiDayEvent(event.start.dateTime, event.end.dateTime);
-        const newStNonJobIds = [];
-        const oldStNonJobIds = existingMapping ? JSON.parse(existingMapping.st_nonjob_ids_json || '[]') : [];
-
-        for (let i = 0; i < eventBlocks.length; i++) {
-            const block = eventBlocks[i];
-            const startDateTime = DateTime.fromISO(block.start, { zone: TIMEZONE });
-            const endDateTime = DateTime.fromISO(block.end, { zone: TIMEZONE });
-            const duration = Interval.fromDateTimes(startDateTime, endDateTime).toDuration().toFormat('hh:mm:ss');
-            
-            const stAppointmentData = {
-                technicianId: userConfig.st_technician_id,
-                timesheetCodeId: userConfig.st_timesheet_code_id,
-                start: startDateTime.toISO(),
-                duration: duration,
-                name: stAppointmentName,
-            };
-
-            let currentStId = oldStNonJobIds[i]; // Try to reuse existing ID
-
-            if (currentStId) {
-                try {
-                    await servicetitan.updateNonJob(currentStId, stAppointmentData);
-                    console.log(`Updated ST non-job ${currentStId} for event ${outlookEventId}.`);
-                } catch (updateError) {
-                    console.error(`Failed to update ST non-job ${currentStId} for ${outlookEventId}:`, updateError);
-                    // If update fails, perhaps the ST non-job was deleted externally, try creating a new one.
-                    currentStId = await servicetitan.createNonJob(stAppointmentData);
-                    console.log(`Created new ST non-job ${currentStId} after failed update for ${outlookEventId}.`);
-                }
-            } else {
-                currentStId = await servicetitan.createNonJob(stAppointmentData);
-                console.log(`Created new ST non-job ${currentStId} for event ${outlookEventId}.`);
-            }
-            newStNonJobIds.push(currentStId);
-        }
-
-        // Delete any remaining old ST non-jobs that are no longer part of this event (e.g., event shortened)
-        for (let i = eventBlocks.length; i < oldStNonJobIds.length; i++) {
-            const stIdToDelete = oldStNonJobIds[i];
-            try {
-                await servicetitan.deleteNonJob(stIdToDelete);
-                console.log(`Deleted surplus ST non-job ${stIdToDelete} for event ${outlookEventId}.`);
-            } catch (delError) {
-                console.error(`Failed to delete surplus ST non-job ${stIdToDelete} for ${outlookEventId}:`, delError);
-            }
-        }
-
-        // 4. Update EventMap
-        await sheets.updateEventMapping(userUpn, outlookEventId, newStNonJobIds, currentEventHash, 'SYNCED', existingMapping ? existingMapping.rowIndex : null);
-    }
-
-    // 5. Update DeltaState with the new deltaLink
-    await sheets.updateDeltaState(userUpn, nextDeltaLink, deltaState.rowIndex);
-    console.log(`Delta sync completed for user: ${userUpn}. Next deltaLink: ${nextDeltaLink}`);
+  }
 }
 
-/**
- * Initiates a full synchronization for all enabled users in TechMap.
- * This is primarily for the nightly backstop Cloud Scheduler job.
- */
+async function runDeltaSyncForUser(userUpn) {
+  console.log('sync.delta.start', { userUpn });
+
+  const techMap = await sheets.getTechMap();
+  const userConfig = techMap.find((user) => user.outlook_upn === userUpn && user.enabled);
+  if (!userConfig) {
+    console.log('sync.delta.skipped.user_not_enabled', { userUpn });
+    return;
+  }
+
+  const deltaState = await sheets.getDeltaState(userUpn);
+  const graphResponse = await graph.getDeltaEvents(userUpn, deltaState.delta_link);
+  const { events, nextDeltaLink } = graphResponse;
+  const summary = createSummary();
+  summary.calendarsProcessed = 1;
+  summary.eventsFetched = events.length;
+
+  await processUserEvents(userConfig, events, summary);
+  await sheets.updateDeltaState(userUpn, nextDeltaLink, deltaState.rowIndex);
+  summary.finishedAt = new Date().toISOString();
+
+  console.log('sync.delta.complete', summary);
+}
+
 async function runFullSyncForAllUsers() {
-    console.log('Starting full sync for all enabled users.');
-    const techMap = await sheets.getTechMap();
-    const pubsub = new PubSub();
-    const topicName = 'graph-notifications';
+  console.log('sync.full.enqueue.start');
+  const techMap = await sheets.getTechMap();
+  const pubsub = new PubSub();
+  const topicName = 'graph-notifications';
 
-    for (const userConfig of techMap) {
-        if (userConfig.enabled) {
-            console.log(`Initiating sync for ${userConfig.outlook_upn} via Pub/Sub.`);
-            // Publish message to trigger individual user sync
-            await pubsub.topic(topicName).publishMessage({ json: { upn: userConfig.outlook_upn } });
-        }
+  for (const userConfig of techMap) {
+    if (!userConfig.enabled) {
+      continue;
     }
-    console.log('Full sync initiation complete. Individual user syncs will proceed via Pub/Sub.');
+    await pubsub.topic(topicName).publishMessage({ json: { upn: userConfig.outlook_upn } });
+  }
+
+  console.log('sync.full.enqueue.complete');
 }
 
-
-/**
- * Renews all active Microsoft Graph subscriptions.
- * This is called by a Cloud Scheduler job.
- */
 async function renewGraphSubscriptions() {
-    console.log('Starting Graph subscription renewal process.');
-    const techMap = await sheets.getTechMap();
-    const secrets = await getSecrets(['GRAPH_WEBHOOK_URL', 'GRAPH_CLIENT_STATE']);
-    const notificationUrl = secrets.GRAPH_WEBHOOK_URL;
-    const clientState = secrets.GRAPH_CLIENT_STATE;
+  console.log('sync.subscriptions.renew.start');
+  const techMap = await sheets.getTechMap();
+  const secrets = await getSecrets(['GRAPH_WEBHOOK_URL', 'GRAPH_CLIENT_STATE']);
 
-    if (!notificationUrl) {
-        console.error('GRAPH_WEBHOOK_URL secret is not configured. Cannot renew subscriptions.');
-        return;
+  for (const userConfig of techMap) {
+    if (!userConfig.enabled) {
+      continue;
     }
-
-    for (const userConfig of techMap) {
-        if (userConfig.enabled) {
-            try {
-                // The createOrRenewSubscription function handles checking for existing subscriptions
-                await graph.createOrRenewSubscription(userConfig.outlook_upn, notificationUrl, clientState);
-                console.log(`Subscription renewed for ${userConfig.outlook_upn}.`);
-            } catch (error) {
-                console.error(`Failed to renew subscription for ${userConfig.outlook_upn}:`, error);
-            }
-        }
+    try {
+      await graph.createOrRenewSubscription(
+        userConfig.outlook_upn,
+        secrets.GRAPH_WEBHOOK_URL,
+        secrets.GRAPH_CLIENT_STATE,
+      );
+    } catch (error) {
+      console.error('sync.subscriptions.renew.error', {
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
     }
-    console.log('Graph subscription renewal process completed.');
+  }
+  console.log('sync.subscriptions.renew.complete');
 }
 
 async function runSyncCycle() {
-    const startedAt = new Date().toISOString();
-    const finishedAt = new Date().toISOString();
+  const summary = createSummary();
+  console.log('sync.cycle.start', {
+    windowPastDays: config.syncWindowPastDays,
+    windowFutureDays: config.syncWindowFutureDays,
+  });
 
-    return {
-        startedAt,
-        finishedAt,
-        calendarsProcessed: 0,
-        eventsFetched: 0,
-        eventsUpserted: 0,
-        eventsSkipped: 0,
-        errors: [],
-    };
+  const techMap = await sheets.getTechMap();
+  const enabledUsers = techMap.filter((user) => user.enabled);
+
+  for (const userConfig of enabledUsers) {
+    summary.calendarsProcessed += 1;
+    try {
+      const events = await graph.getCalendarWindowEvents(
+        userConfig.outlook_upn,
+        config.syncWindowPastDays,
+        config.syncWindowFutureDays,
+      );
+      summary.eventsFetched += events.length;
+      await processUserEvents(userConfig, events, summary);
+      console.log('sync.cycle.user.complete', {
+        userUpn: userConfig.outlook_upn,
+        eventsFetched: events.length,
+      });
+    } catch (error) {
+      summary.errors.push({
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+      console.error('sync.cycle.user.error', {
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+    }
+  }
+
+  summary.finishedAt = new Date().toISOString();
+  console.log('sync.cycle.complete', summary);
+  return summary;
 }
 
-
 module.exports = {
-    runDeltaSyncForUser,
-    runFullSyncForAllUsers,
-    renewGraphSubscriptions,
-    runSyncCycle,
+  runDeltaSyncForUser,
+  runFullSyncForAllUsers,
+  renewGraphSubscriptions,
+  runSyncCycle,
 };
