@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { mapEventToServiceTitanPayloads } = require('../src/services/mapping');
 
 test('mapEventToServiceTitanPayloads maps single block event', () => {
+  delete process.env.ST_REQUIRE_TIMESHEET;
   const userConfig = {
     st_technician_id: '100',
     st_timesheet_code_id: '200',
@@ -18,9 +19,30 @@ test('mapEventToServiceTitanPayloads maps single block event', () => {
 
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0].technicianId, '100');
-  assert.equal(payloads[0].timesheetCodeId, '200');
+  assert.equal(payloads[0].timesheetCodeId, 0);
   assert.equal(payloads[0].duration, '01:30:00');
   assert.equal(payloads[0].name, 'Maintenance');
+  assert.equal(payloads[0].showOnTechnicianSchedule, true);
+  assert.equal(payloads[0].clearDispatchBoard, true);
+  assert.equal(payloads[0].removeTechnicianFromCapacityPlanning, true);
+});
+
+test('mapEventToServiceTitanPayloads supports timesheet-required mode', () => {
+  process.env.ST_REQUIRE_TIMESHEET = 'true';
+  const userConfig = {
+    st_technician_id: '100',
+    st_timesheet_code_id: '200',
+  };
+  const event = {
+    subject: 'Maintenance',
+    isPrivate: false,
+    start: '2026-02-10T16:00:00.000Z',
+    end: '2026-02-10T17:30:00.000Z',
+  };
+
+  const payloads = mapEventToServiceTitanPayloads(event, userConfig);
+  assert.equal(payloads[0].timesheetCodeId, '200');
+  delete process.env.ST_REQUIRE_TIMESHEET;
 });
 
 test('mapEventToServiceTitanPayloads masks private event subject', () => {

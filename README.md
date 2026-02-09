@@ -49,6 +49,11 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 - `ALERT_EMAIL_TO` (optional, requires `SENDGRID_API_KEY`)
 - `ALERT_EMAIL_FROM` (optional, requires `SENDGRID_API_KEY`)
 - `ALERT_COOLDOWN_SECONDS` (optional, default `600`)
+- `ST_REQUIRE_TIMESHEET` (optional, default `false`)
+- `ST_SHOW_ON_TECH_SCHEDULE` (optional, default `true`)
+- `ST_CLEAR_DISPATCH_BOARD` (optional, default `true`)
+- `ST_CLEAR_TECHNICIAN_VIEW` (optional, default `false`)
+- `ST_REMOVE_FROM_CAPACITY` (optional, default `true`)
 
 ## Local Run
 

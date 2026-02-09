@@ -154,6 +154,12 @@ async function createNonJob(appointmentData) {
         start: appointmentData.start, // ISO 8601 string
         duration: appointmentData.duration, // HH:mm:ss
         name: appointmentData.name,
+        allDay: Boolean(appointmentData.allDay),
+        showOnTechnicianSchedule: Boolean(appointmentData.showOnTechnicianSchedule),
+        clearDispatchBoard: Boolean(appointmentData.clearDispatchBoard),
+        clearTechnicianView: Boolean(appointmentData.clearTechnicianView),
+        removeTechnicianFromCapacityPlanning: Boolean(appointmentData.removeTechnicianFromCapacityPlanning),
+        active: appointmentData.active !== false,
     };
 
     const response = await stApiRequest('/non-job-appointments', {
@@ -178,6 +184,12 @@ async function updateNonJob(appointmentId, updateData) {
         start: updateData.start,
         duration: updateData.duration,
         name: updateData.name,
+        allDay: Boolean(updateData.allDay),
+        showOnTechnicianSchedule: Boolean(updateData.showOnTechnicianSchedule),
+        clearDispatchBoard: Boolean(updateData.clearDispatchBoard),
+        clearTechnicianView: Boolean(updateData.clearTechnicianView),
+        removeTechnicianFromCapacityPlanning: Boolean(updateData.removeTechnicianFromCapacityPlanning),
+        active: updateData.active !== false,
     };
 
     await stApiRequest(`/non-job-appointments/${appointmentId}`, {
