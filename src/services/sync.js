@@ -5,9 +5,6 @@ const sheets = require('./sheets');
 const { getSecrets } = require('../utils/secrets');
 const { normalizeGraphEvent, getEventDedupeKey } = require('../utils/normalize');
 const { mapEventToServiceTitanPayloads } = require('./mapping');
-const { loadConfig } = require('../config');
-
-const config = loadConfig();
 
 function createSummary() {
   return {
@@ -123,20 +120,25 @@ async function processUserEvents(userConfig, rawEvents, summary) {
   }
 }
 
-async function runDeltaSyncForUser(userUpn) {
+async function runDeltaSyncForUser(userUpn, userConfigOverride = null) {
+  const summary = createSummary();
   console.log('sync.delta.start', { userUpn });
 
-  const techMap = await sheets.getTechMap();
-  const userConfig = techMap.find((user) => user.outlook_upn === userUpn && user.enabled);
+  let userConfig = userConfigOverride;
+  if (!userConfig) {
+    const techMap = await sheets.getTechMap();
+    userConfig = techMap.find((user) => user.outlook_upn === userUpn && user.enabled);
+  }
+
   if (!userConfig) {
     console.log('sync.delta.skipped.user_not_enabled', { userUpn });
-    return;
+    summary.finishedAt = new Date().toISOString();
+    return summary;
   }
 
   const deltaState = await sheets.getDeltaState(userUpn);
   const graphResponse = await graph.getDeltaEvents(userUpn, deltaState.delta_link);
   const { events, nextDeltaLink } = graphResponse;
-  const summary = createSummary();
   summary.calendarsProcessed = 1;
   summary.eventsFetched = events.length;
 
@@ -145,6 +147,7 @@ async function runDeltaSyncForUser(userUpn) {
   summary.finishedAt = new Date().toISOString();
 
   console.log('sync.delta.complete', summary);
+  return summary;
 }
 
 async function runFullSyncForAllUsers() {
@@ -190,27 +193,27 @@ async function renewGraphSubscriptions() {
 
 async function runSyncCycle() {
   const summary = createSummary();
-  console.log('sync.cycle.start', {
-    windowPastDays: config.syncWindowPastDays,
-    windowFutureDays: config.syncWindowFutureDays,
-  });
+  console.log('sync.cycle.start', { mode: 'delta' });
 
   const techMap = await sheets.getTechMap();
   const enabledUsers = techMap.filter((user) => user.enabled);
 
   for (const userConfig of enabledUsers) {
-    summary.calendarsProcessed += 1;
     try {
-      const events = await graph.getCalendarWindowEvents(
+      const userSummary = await runDeltaSyncForUser(
         userConfig.outlook_upn,
-        config.syncWindowPastDays,
-        config.syncWindowFutureDays,
+        userConfig,
       );
-      summary.eventsFetched += events.length;
-      await processUserEvents(userConfig, events, summary);
+      summary.calendarsProcessed += userSummary.calendarsProcessed;
+      summary.eventsFetched += userSummary.eventsFetched;
+      summary.eventsUpserted += userSummary.eventsUpserted;
+      summary.eventsSkipped += userSummary.eventsSkipped;
+      summary.errors.push(...userSummary.errors);
       console.log('sync.cycle.user.complete', {
         userUpn: userConfig.outlook_upn,
-        eventsFetched: events.length,
+        eventsFetched: userSummary.eventsFetched,
+        eventsUpserted: userSummary.eventsUpserted,
+        eventsSkipped: userSummary.eventsSkipped,
       });
     } catch (error) {
       summary.errors.push({

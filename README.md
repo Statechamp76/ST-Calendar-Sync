@@ -12,7 +12,7 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 ## Endpoints
 
 - `GET /health` -> `200 ok`
-- `POST /run-sync` -> triggers one sync cycle and returns JSON summary
+- `POST /run-sync` -> triggers one delta sync cycle (all enabled users) and returns JSON summary
 
 `/run-sync` response shape:
 
