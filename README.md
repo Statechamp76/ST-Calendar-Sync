@@ -42,6 +42,7 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 - `SERVICETITAN_CLIENT_ID`
 - `SERVICETITAN_CLIENT_SECRET`
 - `SERVICETITAN_TENANT_ID`
+- `SERVICETITAN_APP_KEY` (optional, if your tenant requires app key header)
 - `GOOGLE_SPREADSHEET_ID`
 
 ## Local Run

@@ -70,8 +70,9 @@ async function stApiRequest(endpoint, options = {}) {
     const token = await getAccessToken();
     const secrets = await getSecrets(['SERVICETITAN_TENANT_ID']);
     const tenantId = secrets.SERVICETITAN_TENANT_ID;
+    const appKey = process.env.SERVICETITAN_APP_KEY || '';
 
-    const baseUrl = `https://api.servicetitan.io/v2/tenant/${tenantId}`; // Using v2 API
+    const baseUrl = `https://api.servicetitan.io/dispatch/v2/tenant/${tenantId}`;
 
     const defaultHeaders = {
         'Authorization': `Bearer ${token}`,
@@ -79,6 +80,9 @@ async function stApiRequest(endpoint, options = {}) {
         'ST-Tenant': tenantId,
         'Accept': 'application/json'
     };
+    if (appKey) {
+        defaultHeaders['ST-App-Key'] = appKey;
+    }
 
     const config = {
         ...options,
@@ -152,7 +156,7 @@ async function createNonJob(appointmentData) {
         name: appointmentData.name,
     };
 
-    const response = await stApiRequest('/nonjobappointments', {
+    const response = await stApiRequest('/non-job-appointments', {
         method: 'POST',
         body: JSON.stringify(payload),
     });
@@ -176,7 +180,7 @@ async function updateNonJob(appointmentId, updateData) {
         name: updateData.name,
     };
 
-    await stApiRequest(`/nonjobappointments/${appointmentId}`, {
+    await stApiRequest(`/non-job-appointments/${appointmentId}`, {
         method: 'PUT',
         body: JSON.stringify(payload),
     });
@@ -190,7 +194,7 @@ async function updateNonJob(appointmentId, updateData) {
  */
 async function deleteNonJob(appointmentId) {
     console.log(`Deleting Non-Job Appointment ${appointmentId}`);
-    await stApiRequest(`/nonjobappointments/${appointmentId}`, {
+    await stApiRequest(`/non-job-appointments/${appointmentId}`, {
         method: 'DELETE',
     });
     console.log(`Non-Job Appointment ${appointmentId} deleted.`);
