@@ -10,7 +10,7 @@ function normalizeGraphEvent(event) {
     start,
     end,
     isAllDay: Boolean(event.isAllDay),
-    showAs: event.showAs || 'busy',
+    showAs: (event.showAs || 'busy').toLowerCase(),
     isPrivate: event.sensitivity === 'private',
     location: event.location?.displayName || '',
     attendees: (event.attendees || []).map((attendee) => ({
@@ -20,6 +20,7 @@ function normalizeGraphEvent(event) {
     })),
     bodyPreview: event.bodyPreview || '',
     lastModifiedDateTime: normalizeDateTimeValue(event.lastModifiedDateTime),
+    isRemoved: Boolean(event['@removed']),
   };
 }
 

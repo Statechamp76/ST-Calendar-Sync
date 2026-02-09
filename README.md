@@ -132,3 +132,9 @@ Required IAM for deployer service account:
 - `roles/iam.serviceAccountUser` on the runtime service account used by Cloud Run
 - `roles/cloudbuild.builds.editor` (for `--source` builds)
 - `roles/artifactregistry.writer` (if build artifacts are pushed)
+Sync behavior rules:
+
+- Multi-day Outlook events are split into single-day ServiceTitan non-job appointments.
+- Delta tombstones (`@removed`) delete previously mapped ServiceTitan non-job appointments.
+- Events marked `free`/`available` are not created in ServiceTitan; existing mapped records are removed.
+- Events marked `private` are synced to ServiceTitan with the name `Busy`.

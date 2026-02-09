@@ -33,6 +33,7 @@ test('normalizeGraphEvent returns expected normalized shape', () => {
   assert.match(normalized.end, /Z$/);
   assert.equal(normalized.bodyPreview, 'Agenda');
   assert.equal(normalized.lastModifiedDateTime, '2026-02-01T15:30:00.000Z');
+  assert.equal(normalized.isRemoved, false);
 });
 
 test('getEventDedupeKey uses id + lastModifiedDateTime', () => {
@@ -42,4 +43,16 @@ test('getEventDedupeKey uses id + lastModifiedDateTime', () => {
   });
 
   assert.equal(key, 'event-id:2026-02-01T15:30:00.000Z');
+});
+
+test('normalizeGraphEvent marks tombstone events', () => {
+  const normalized = normalizeGraphEvent({
+    id: 'deleted-1',
+    '@removed': { reason: 'deleted' },
+  });
+
+  assert.equal(normalized.id, 'deleted-1');
+  assert.equal(normalized.isRemoved, true);
+  assert.equal(normalized.start, null);
+  assert.equal(normalized.end, null);
 });

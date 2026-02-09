@@ -29,6 +29,19 @@ function parseJsonArray(value) {
   }
 }
 
+function isAvailabilityEvent(showAs) {
+  const value = (showAs || '').toLowerCase();
+  return value === 'free' || value === 'available';
+}
+
+async function deleteMappedEvent(userUpn, outlookEventId, existingMapping) {
+  const existingIds = parseJsonArray(existingMapping.st_nonjob_ids_json);
+  for (const appointmentId of existingIds) {
+    await servicetitan.deleteNonJob(appointmentId);
+  }
+  await sheets.deleteEventMapping(userUpn, outlookEventId);
+}
+
 async function upsertServiceTitanAppointments(userConfig, event, existingMapping) {
   const payloads = mapEventToServiceTitanPayloads(event, userConfig);
   const previousIds = existingMapping ? parseJsonArray(existingMapping.st_nonjob_ids_json) : [];
@@ -62,18 +75,24 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
   const existingMapping = await sheets.findEventMapping(userConfig.outlook_upn, normalizedEvent.id);
   const dedupeKey = getEventDedupeKey(normalizedEvent);
 
+  // Graph delta tombstones (`@removed`) must delete any mapped ST records.
+  if (normalizedEvent.isRemoved) {
+    if (existingMapping) {
+      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
+    }
+    summary.eventsSkipped += 1;
+    return;
+  }
+
   if (!normalizedEvent.start || !normalizedEvent.end) {
     summary.eventsSkipped += 1;
     return;
   }
 
-  if (normalizedEvent.showAs === 'free') {
+  // Do not sync available/free events; remove existing ST mapping if present.
+  if (isAvailabilityEvent(normalizedEvent.showAs)) {
     if (existingMapping) {
-      const existingIds = parseJsonArray(existingMapping.st_nonjob_ids_json);
-      for (const appointmentId of existingIds) {
-        await servicetitan.deleteNonJob(appointmentId);
-      }
-      await sheets.deleteEventMapping(userConfig.outlook_upn, normalizedEvent.id);
+      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
     }
     summary.eventsSkipped += 1;
     return;
