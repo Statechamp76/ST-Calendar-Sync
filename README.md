@@ -107,3 +107,27 @@ gcloud scheduler jobs create http st-calendar-sync-job `
 ```
 
 The `--oidc-token-audience` value must match `RUN_SYNC_AUDIENCE`.
+
+## GitHub -> Cloud Run Auto Deploy
+
+Workflow file: `.github/workflows/deploy-cloud-run.yml`
+
+Runs on push to `main` (and manual trigger), then deploys this repo to Cloud Run using Workload Identity Federation.
+
+Configure these GitHub repository settings:
+
+- `Variables`
+- `GCP_PROJECT_ID`: your GCP project id
+- `CLOUD_RUN_SERVICE`: `st-calendar-sync`
+- `CLOUD_RUN_REGION`: `us-central1`
+
+- `Secrets`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`: full provider resource name (`projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`)
+- `GCP_SERVICE_ACCOUNT`: deployer service account email (example: `github-deployer@<PROJECT_ID>.iam.gserviceaccount.com`)
+
+Required IAM for deployer service account:
+
+- `roles/run.admin`
+- `roles/iam.serviceAccountUser` on the runtime service account used by Cloud Run
+- `roles/cloudbuild.builds.editor` (for `--source` builds)
+- `roles/artifactregistry.writer` (if build artifacts are pushed)
