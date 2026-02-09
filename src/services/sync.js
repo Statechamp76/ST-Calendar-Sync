@@ -5,6 +5,7 @@ const { splitMultiDayEvent, TIMEZONE } = require('../utils/time');
 const { getSecrets } = require('../utils/secrets');
 const crypto = require('crypto');
 const { DateTime, Duration, Interval } = require('luxon');
+const { PubSub } = require('@google-cloud/pubsub');
 
 /**
  * Generates a hash for an Outlook event based on its significant properties.
@@ -230,9 +231,25 @@ async function renewGraphSubscriptions() {
     console.log('Graph subscription renewal process completed.');
 }
 
+async function runSyncCycle() {
+    const startedAt = new Date().toISOString();
+    const finishedAt = new Date().toISOString();
+
+    return {
+        startedAt,
+        finishedAt,
+        calendarsProcessed: 0,
+        eventsFetched: 0,
+        eventsUpserted: 0,
+        eventsSkipped: 0,
+        errors: [],
+    };
+}
+
 
 module.exports = {
     runDeltaSyncForUser,
     runFullSyncForAllUsers,
     renewGraphSubscriptions,
+    runSyncCycle,
 };

@@ -1,6 +1,7 @@
 const express = require('express');
 const { PubSub } = require('@google-cloud/pubsub');
 const syncService = require('./services/sync'); // Will be implemented later
+const { requireOidcAuth } = require('./middleware/auth');
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
@@ -107,7 +108,25 @@ app.post('/graph/subscriptions/renew', async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.status(200).send('OK');
+    res.status(200).send('ok');
+});
+
+app.post('/run-sync', requireOidcAuth, async (req, res) => {
+    try {
+        const summary = await syncService.runSyncCycle();
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Run sync failed:', error);
+        res.status(500).json({
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            calendarsProcessed: 0,
+            eventsFetched: 0,
+            eventsUpserted: 0,
+            eventsSkipped: 0,
+            errors: [{ message: error.message }],
+        });
+    }
 });
 
 module.exports = app;
