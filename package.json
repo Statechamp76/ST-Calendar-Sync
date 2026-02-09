@@ -1,0 +1,26 @@
+{
+  "name": "outlook-servicetitan-sync",
+  "version": "1.0.0",
+  "description": "One-way calendar synchronization system from Microsoft Outlook into ServiceTitan Non-Job Appointments.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^5.0.3",
+    "@google-cloud/pubsub": "^4.0.0",
+    "@google-cloud/secret-manager": "^5.0.0",
+    "@microsoft/microsoft-graph-client": "^3.0.0",
+    "crypto": "^1.0.1",
+    "express": "^4.19.0",
+    "googleapis": "^129.0.0",
+    "luxon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
