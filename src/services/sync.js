@@ -5,6 +5,7 @@ const sheets = require('./sheets');
 const { getSecrets } = require('../utils/secrets');
 const { normalizeGraphEvent, getEventDedupeKey } = require('../utils/normalize');
 const { mapEventToServiceTitanPayloads } = require('./mapping');
+const { notifyFailure } = require('./alerts');
 
 function createSummary() {
   return {
@@ -189,6 +190,7 @@ async function renewGraphSubscriptions() {
   console.log('sync.subscriptions.renew.start');
   const techMap = await sheets.getTechMap();
   const secrets = await getSecrets(['GRAPH_WEBHOOK_URL', 'GRAPH_CLIENT_STATE']);
+  const errors = [];
 
   for (const userConfig of techMap) {
     if (!userConfig.enabled) {
@@ -201,11 +203,21 @@ async function renewGraphSubscriptions() {
         secrets.GRAPH_CLIENT_STATE,
       );
     } catch (error) {
+      errors.push({
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
       console.error('sync.subscriptions.renew.error', {
         userUpn: userConfig.outlook_upn,
         message: error.message,
       });
     }
+  }
+  if (errors.length > 0) {
+    await notifyFailure('ST Calendar Sync: subscription renewal errors', {
+      errorCount: errors.length,
+      sample: errors.slice(0, 5),
+    });
   }
   console.log('sync.subscriptions.renew.complete');
 }

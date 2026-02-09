@@ -44,6 +44,11 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 - `SERVICETITAN_TENANT_ID`
 - `SERVICETITAN_APP_KEY` (optional, if your tenant requires app key header)
 - `GOOGLE_SPREADSHEET_ID`
+- `ALERT_SLACK_WEBHOOK_URL` (optional)
+- `SENDGRID_API_KEY` (optional, for email alerts)
+- `ALERT_EMAIL_TO` (optional, requires `SENDGRID_API_KEY`)
+- `ALERT_EMAIL_FROM` (optional, requires `SENDGRID_API_KEY`)
+- `ALERT_COOLDOWN_SECONDS` (optional, default `600`)
 
 ## Local Run
 

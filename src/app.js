@@ -2,6 +2,7 @@ const express = require('express');
 const { PubSub } = require('@google-cloud/pubsub');
 const syncService = require('./services/sync'); // Will be implemented later
 const { requireOidcAuth } = require('./middleware/auth');
+const { notifyFailure } = require('./services/alerts');
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
@@ -79,6 +80,9 @@ app.post('/sync/user', async (req, res) => {
         res.status(204).send(); // Success, no content. Pub/Sub will acknowledge the message.
     } catch (error) {
   console.error('Error syncing user:', error);
+  await notifyFailure('ST Calendar Sync: /sync/user failed', {
+    message: error.message,
+  });
   res.status(500).send('Internal Server Error');
 }
 
@@ -119,9 +123,18 @@ app.get('/health', (req, res) => {
 app.post('/run-sync', requireOidcAuth, async (req, res) => {
     try {
         const summary = await syncService.runSyncCycle();
+        if (summary.errors && summary.errors.length > 0) {
+            await notifyFailure('ST Calendar Sync: /run-sync completed with errors', {
+                errorCount: summary.errors.length,
+                sample: summary.errors.slice(0, 5),
+            });
+        }
         res.status(200).json(summary);
     } catch (error) {
         console.error('Run sync failed:', error);
+        await notifyFailure('ST Calendar Sync: /run-sync failed', {
+            message: error.message,
+        });
         res.status(500).json({
             startedAt: new Date().toISOString(),
             finishedAt: new Date().toISOString(),
