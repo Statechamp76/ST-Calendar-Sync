@@ -70,7 +70,7 @@ async function stApiRequest(endpoint, options = {}) {
     const token = await getAccessToken();
     const secrets = await getSecrets(['SERVICETITAN_TENANT_ID']);
     const tenantId = secrets.SERVICETITAN_TENANT_ID;
-    const appKey = process.env.SERVICETITAN_APP_KEY || '';
+    const appKey = (process.env.SERVICETITAN_APP_KEY || '').trim();
 
     const baseUrl = `https://api.servicetitan.io/dispatch/v2/tenant/${tenantId}`;
 
