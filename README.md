@@ -14,6 +14,20 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 - `GET /health` -> `200 ok`
 - `POST /run-sync` -> triggers one sync cycle and returns JSON summary
 
+`/run-sync` response shape:
+
+```json
+{
+  "startedAt": "2026-02-09T17:00:00.000Z",
+  "finishedAt": "2026-02-09T17:00:12.125Z",
+  "calendarsProcessed": 3,
+  "eventsFetched": 42,
+  "eventsUpserted": 17,
+  "eventsSkipped": 25,
+  "errors": []
+}
+```
+
 ## Required Environment Variables
 
 - `RUN_SYNC_AUDIENCE`
@@ -49,6 +63,7 @@ curl http://localhost:8080/health
 gcloud run deploy st-calendar-sync `
   --source . `
   --region us-central1 `
+  --service-account st-calendar-sync-sa@<PROJECT_ID>.iam.gserviceaccount.com `
   --no-allow-unauthenticated
 ```
 
@@ -67,3 +82,28 @@ gcloud run services update st-calendar-sync `
   --region us-central1 `
   --set-secrets GRAPH_CLIENT_ID=GRAPH_CLIENT_ID:latest,GRAPH_CLIENT_SECRET=GRAPH_CLIENT_SECRET:latest,GRAPH_TENANT_ID=GRAPH_TENANT_ID:latest,SERVICETITAN_CLIENT_ID=SERVICETITAN_CLIENT_ID:latest,SERVICETITAN_CLIENT_SECRET=SERVICETITAN_CLIENT_SECRET:latest,SERVICETITAN_TENANT_ID=SERVICETITAN_TENANT_ID:latest,GOOGLE_SPREADSHEET_ID=GOOGLE_SPREADSHEET_ID:latest,GRAPH_WEBHOOK_URL=GRAPH_WEBHOOK_URL:latest,GRAPH_CLIENT_STATE=GRAPH_CLIENT_STATE:latest
 ```
+
+## Cloud Scheduler (OIDC) For `/run-sync`
+
+Give the Scheduler service account permission to invoke Cloud Run:
+
+```powershell
+gcloud run services add-iam-policy-binding st-calendar-sync `
+  --region us-central1 `
+  --member serviceAccount:<SCHEDULER_SA_EMAIL> `
+  --role roles/run.invoker
+```
+
+Create scheduler job:
+
+```powershell
+gcloud scheduler jobs create http st-calendar-sync-job `
+  --location us-central1 `
+  --schedule "*/15 * * * *" `
+  --uri "https://st-calendar-sync-<hash>-uc.a.run.app/run-sync" `
+  --http-method POST `
+  --oidc-service-account-email "<SCHEDULER_SA_EMAIL>" `
+  --oidc-token-audience "https://st-calendar-sync-<hash>-uc.a.run.app"
+```
+
+The `--oidc-token-audience` value must match `RUN_SYNC_AUDIENCE`.
