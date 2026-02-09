@@ -2,6 +2,8 @@
 
 Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as ServiceTitan non-job appointments.
 
+For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operational state and deferred tasks.
+
 ## App Location And Entrypoint
 
 - App root: this repository root (no `outlook-sync-service/` subfolder)
