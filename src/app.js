@@ -88,7 +88,17 @@ app.post('/sync/user', requireOidcAuth, async (req, res) => {
             }
         }
 
-        const userUpn = typeof message === 'string' ? message : message.upn;
+        let userUpn = typeof message === 'string' ? message : message.upn;
+
+        // Additional tolerance: sometimes test publishes (or badly formatted payloads) arrive as `{upn:someone@...}`
+        // which is not valid JSON. Extract the UPN if possible.
+        if (typeof userUpn === 'string') {
+            const trimmed = userUpn.trim();
+            const m = trimmed.match(/upn[:=]\s*([^,}\s]+)/i);
+            if (m && m[1]) {
+                userUpn = m[1].trim();
+            }
+        }
 
         if (!userUpn) {
             console.error('Received Pub/Sub message with missing UPN:', message);
@@ -185,6 +195,35 @@ app.post('/backfill/last-30-days', requireOidcAuth, async (req, res) => {
     } catch (error) {
         console.error('Backfill last 30 days failed:', error);
         await notifyFailure('ST Calendar Sync: /backfill/last-30-days failed', {
+            message: error.message,
+        });
+        res.status(500).json({
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            calendarsProcessed: 0,
+            eventsFetched: 0,
+            eventsUpserted: 0,
+            eventsSkipped: 0,
+            errors: [{ message: error.message }],
+        });
+    }
+});
+
+// One-time forward-looking backfill: pull next 90 days of calendarView for all enabled users and upsert only busy/OOF.
+// Does not modify Outlook; it only creates/updates/deletes ServiceTitan non-job appointments + sheet mappings.
+app.post('/backfill/next-90-days', requireOidcAuth, async (req, res) => {
+    try {
+        const summary = await syncService.runBackfillNext90DaysAllUsers();
+        if (summary.errors && summary.errors.length > 0) {
+            await notifyFailure('ST Calendar Sync: /backfill/next-90-days completed with errors', {
+                errorCount: summary.errors.length,
+                sample: summary.errors.slice(0, 5),
+            });
+        }
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Backfill next 90 days failed:', error);
+        await notifyFailure('ST Calendar Sync: /backfill/next-90-days failed', {
             message: error.message,
         });
         res.status(500).json({

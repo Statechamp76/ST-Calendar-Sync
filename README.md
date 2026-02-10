@@ -15,6 +15,8 @@ For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operati
 
 - `GET /health` -> `200 ok`
 - `POST /run-sync` -> triggers one delta sync cycle (all enabled users) and returns JSON summary
+- `POST /backfill/last-30-days` -> one-time backfill for past 30 days (busy/OOF only)
+- `POST /backfill/next-90-days` -> one-time backfill for next 90 days (busy/OOF only)
 
 `/run-sync` response shape:
 

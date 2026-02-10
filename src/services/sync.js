@@ -228,6 +228,72 @@ async function runBackfillLast30DaysForUser(userUpn, userConfigOverride = null) 
   return summary;
 }
 
+async function runBackfillNext90DaysForUser(userUpn, userConfigOverride = null) {
+  const summary = createSummary();
+  console.log('sync.backfill90.start', { userUpn });
+
+  let userConfig = userConfigOverride;
+  if (!userConfig) {
+    const techMap = await sheets.getTechMap();
+    userConfig = techMap.find((user) => user.outlook_upn === userUpn && user.enabled);
+  }
+
+  if (!userConfig) {
+    console.log('sync.backfill90.skipped.user_not_enabled', { userUpn });
+    summary.finishedAt = new Date().toISOString();
+    return summary;
+  }
+
+  // Full pull (not delta): next 90 days only.
+  const events = await graph.getCalendarWindowEvents(userUpn, 0, 90);
+  summary.calendarsProcessed = 1;
+  summary.eventsFetched = events.length;
+
+  await processUserEvents(userConfig, events, summary);
+  summary.finishedAt = new Date().toISOString();
+
+  console.log('sync.backfill90.complete', summary);
+  return summary;
+}
+
+async function runBackfillNext90DaysAllUsers() {
+  const summary = createSummary();
+  console.log('sync.backfill90.all.start');
+
+  const techMap = await sheets.getTechMap();
+  const enabledUsers = techMap.filter((user) => user.enabled);
+
+  for (const userConfig of enabledUsers) {
+    try {
+      const userSummary = await runBackfillNext90DaysForUser(userConfig.outlook_upn, userConfig);
+      summary.calendarsProcessed += userSummary.calendarsProcessed;
+      summary.eventsFetched += userSummary.eventsFetched;
+      summary.eventsUpserted += userSummary.eventsUpserted;
+      summary.eventsSkipped += userSummary.eventsSkipped;
+      summary.errors.push(...userSummary.errors);
+      console.log('sync.backfill90.user.complete', {
+        userUpn: userConfig.outlook_upn,
+        eventsFetched: userSummary.eventsFetched,
+        eventsUpserted: userSummary.eventsUpserted,
+        eventsSkipped: userSummary.eventsSkipped,
+      });
+    } catch (error) {
+      summary.errors.push({
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+      console.error('sync.backfill90.user.error', {
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+    }
+  }
+
+  summary.finishedAt = new Date().toISOString();
+  console.log('sync.backfill90.all.complete', summary);
+  return summary;
+}
+
 async function runBackfillLast30DaysAllUsers() {
   const summary = createSummary();
   console.log('sync.backfill30.all.start');
@@ -363,6 +429,8 @@ module.exports = {
   runDeltaSyncForUser,
   runBackfillLast30DaysForUser,
   runBackfillLast30DaysAllUsers,
+  runBackfillNext90DaysForUser,
+  runBackfillNext90DaysAllUsers,
   runFullSyncForAllUsers,
   renewGraphSubscriptions,
   runSyncCycle,
