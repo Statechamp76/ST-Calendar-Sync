@@ -281,10 +281,18 @@ async function resetSyncState(options = {}) {
   };
 }
 
+async function clearSyncSheets() {
+  // Clear mappings but keep headers.
+  await sheets.clearSheetRange('EventMap!A2:F');
+  await sheets.clearSheetRange('DeltaState!A2:E');
+  return { cleared: true };
+}
+
 module.exports = {
   dedupeNonJobsThisWeekForward,
   purgeNonJobsInWindow,
   resetSyncState,
+  clearSyncSheets,
   toIsoAtTzDayStart,
   toIsoAtTzDayEnd,
 };

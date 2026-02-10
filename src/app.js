@@ -297,4 +297,19 @@ app.post('/cleanup/reset', requireOidcAuth, async (req, res) => {
     }
 });
 
+// Clears EventMap + DeltaState (keeps headers). Useful after a purge where the request timed out.
+app.post('/cleanup/clear-sheets', requireOidcAuth, async (req, res) => {
+    try {
+        const summary = await cleanupService.clearSyncSheets();
+        console.log('cleanup.clear_sheets.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Clear sheets failed:', error);
+        await notifyFailure('ST Calendar Sync: /cleanup/clear-sheets failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = app;
