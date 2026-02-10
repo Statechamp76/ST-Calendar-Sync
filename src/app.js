@@ -286,6 +286,7 @@ app.post('/cleanup/reset', requireOidcAuth, async (req, res) => {
             dryRun,
             skipSheetsClear: body.skipSheetsClear === true,
             includeDisabled: body.includeDisabled !== false,
+            allTechnicians: body.allTechnicians === true,
         });
         console.log('cleanup.reset.complete', summary);
         res.status(200).json(summary);

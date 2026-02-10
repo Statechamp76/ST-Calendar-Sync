@@ -174,31 +174,54 @@ async function purgeNonJobsInWindow(options = {}) {
     startsOnOrBefore = null,
     dryRun = true,
     includeDisabled = true,
+    allTechnicians = false,
   } = options;
 
   const defaults = getDefaultStartAndEnd();
   const startIso = startsOnOrAfter || defaults.startsOnOrAfter;
   const endIso = startsOnOrBefore || defaults.startsOnOrBefore;
 
-  const techMap = await sheets.getTechMap();
-  const users = techMap.filter((u) => {
-    if (!u.st_technician_id) return false;
-    return includeDisabled ? true : Boolean(u.enabled);
-  });
+  let techIds = [];
+
+  if (allTechnicians) {
+    // Prefer ServiceTitan as the source of truth for the purge target list.
+    // This is the only reliable way to delete *all* non-job appointments across the tenant.
+    const all = [];
+    let page = 1;
+    const pageSize = 500;
+    while (true) {
+      const batch = await servicetitan.listTechnicians({ page, pageSize });
+      all.push(...batch);
+      if (!batch || batch.length < pageSize) break;
+      page += 1;
+      if (page > 200) break; // safety cap
+    }
+    techIds = all
+      .map((t) => t && (t.id ?? t.technicianId))
+      .filter((id) => id !== undefined && id !== null && String(id).trim() !== '')
+      .map((id) => String(id));
+  } else {
+    const techMap = await sheets.getTechMap();
+    techIds = techMap
+      .filter((u) => u.st_technician_id && (includeDisabled ? true : Boolean(u.enabled)))
+      .map((u) => String(u.st_technician_id));
+  }
+
+  techIds = [...new Set(techIds)];
 
   const summary = {
     startsOnOrAfter: startIso,
     startsOnOrBefore: endIso,
     techniciansProcessed: 0,
+    techniciansTargeted: techIds.length,
     appointmentsFound: 0,
     appointmentsToDelete: 0,
     deleted: 0,
     errors: [],
   };
 
-  for (const user of users) {
+  for (const techId of techIds) {
     summary.techniciansProcessed += 1;
-    const techId = String(user.st_technician_id);
 
     try {
       const pageSize = 500;
@@ -237,11 +260,10 @@ async function purgeNonJobsInWindow(options = {}) {
         if (page > 200) break; // safety cap
       }
 
-      console.log('cleanup.purge.tech.complete', { techId, userUpn: user.outlook_upn, totalForTech });
+      console.log('cleanup.purge.tech.complete', { techId, totalForTech });
     } catch (error) {
       summary.errors.push({
         technicianId: techId,
-        userUpn: user.outlook_upn,
         message: error.message,
       });
     }
@@ -257,6 +279,7 @@ async function resetSyncState(options = {}) {
     dryRun = true,
     skipSheetsClear = false,
     includeDisabled = true,
+    allTechnicians = false,
   } = options;
 
   const purgeSummary = await purgeNonJobsInWindow({
@@ -264,6 +287,7 @@ async function resetSyncState(options = {}) {
     startsOnOrBefore,
     dryRun,
     includeDisabled,
+    allTechnicians,
   });
 
   let sheetsCleared = false;

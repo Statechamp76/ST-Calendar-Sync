@@ -295,9 +295,35 @@ async function listNonJobs(options = {}) {
     throw lastError || new Error('Failed to list non-job appointments');
 }
 
+async function listTechnicians(options = {}) {
+    const {
+        page = 1,
+        pageSize = 500,
+        active = null,
+    } = options;
+
+    const candidateQueries = [
+        { page, pageSize, active },
+        { page, pageSize },
+    ];
+
+    let lastError = null;
+    for (const q of candidateQueries) {
+        try {
+            const data = await stApiRequest(`/technicians${buildQuery(q)}`, { method: 'GET' });
+            return normalizeListResponse(data);
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    throw lastError || new Error('Failed to list technicians');
+}
+
 module.exports = {
     createNonJob,
     updateNonJob,
     deleteNonJob,
     listNonJobs,
+    listTechnicians,
 };
