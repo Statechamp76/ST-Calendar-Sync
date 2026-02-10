@@ -246,8 +246,58 @@ async function deleteNonJob(appointmentId) {
     }
 }
 
+function normalizeListResponse(data) {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.data)) return data.data;
+    if (Array.isArray(data.items)) return data.items;
+    if (Array.isArray(data.value)) return data.value;
+    return [];
+}
+
+function buildQuery(params) {
+    const usp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+        if (v === undefined || v === null || v === '') continue;
+        usp.set(k, String(v));
+    }
+    const s = usp.toString();
+    return s ? `?${s}` : '';
+}
+
+async function listNonJobs(options = {}) {
+    const {
+        technicianId = null,
+        startsOnOrAfter = null,
+        startsOnOrBefore = null,
+        page = 1,
+        pageSize = 200,
+    } = options;
+
+    // ServiceTitan's list query parameters vary by tenant/API version. Try a few known shapes.
+    const candidateQueries = [
+        { technicianId, startsOnOrAfter, startsOnOrBefore, page, pageSize },
+        { technicianId, startOnOrAfter: startsOnOrAfter, startOnOrBefore: startsOnOrBefore, page, pageSize },
+        { technicianId, start: startsOnOrAfter, end: startsOnOrBefore, page, pageSize },
+        { technicianId, from: startsOnOrAfter, to: startsOnOrBefore, page, pageSize },
+    ];
+
+    let lastError = null;
+    for (const q of candidateQueries) {
+        try {
+            const data = await stApiRequest(`/non-job-appointments${buildQuery(q)}`, { method: 'GET' });
+            return normalizeListResponse(data);
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    throw lastError || new Error('Failed to list non-job appointments');
+}
+
 module.exports = {
     createNonJob,
     updateNonJob,
     deleteNonJob,
+    listNonJobs,
 };

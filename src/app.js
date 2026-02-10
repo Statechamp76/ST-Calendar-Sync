@@ -5,6 +5,7 @@ const { requireOidcAuth } = require('./middleware/auth');
 const { notifyFailure } = require('./services/alerts');
 const { getSecrets } = require('./utils/secrets');
 const { loadConfig } = require('./config');
+const cleanupService = require('./services/cleanup');
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
@@ -235,6 +236,27 @@ app.post('/backfill/next-90-days', requireOidcAuth, async (req, res) => {
             eventsSkipped: 0,
             errors: [{ message: error.message }],
         });
+    }
+});
+
+// One-time maintenance: deduplicate ServiceTitan non-job appointments created by this sync (Busy/Out of Office blockers)
+// from the current week forward (default 90-day window), without touching Outlook.
+app.post('/cleanup/deduplicate', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const dryRun = body.dryRun !== false;
+        const summary = await cleanupService.dedupeNonJobsThisWeekForward({
+            startsOnOrAfter: body.startsOnOrAfter || null,
+            startsOnOrBefore: body.startsOnOrBefore || null,
+            dryRun,
+        });
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Deduplicate failed:', error);
+        await notifyFailure('ST Calendar Sync: /cleanup/deduplicate failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
     }
 });
 
