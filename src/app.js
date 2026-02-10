@@ -261,4 +261,27 @@ app.post('/cleanup/deduplicate', requireOidcAuth, async (req, res) => {
     }
 });
 
+// Nuclear option: delete ALL ServiceTitan non-job appointments in the sync window for all enabled technicians,
+// then clear EventMap + DeltaState so the next sync rebuilds from Graph.
+// Never touches Outlook.
+app.post('/cleanup/reset', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const dryRun = body.dryRun !== false;
+        const summary = await cleanupService.resetSyncState({
+            startsOnOrAfter: body.startsOnOrAfter || null,
+            startsOnOrBefore: body.startsOnOrBefore || null,
+            dryRun,
+        });
+        console.log('cleanup.reset.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Reset failed:', error);
+        await notifyFailure('ST Calendar Sync: /cleanup/reset failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
 module.exports = app;

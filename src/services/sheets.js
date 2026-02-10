@@ -95,6 +95,16 @@ async function updateSheetRange(range, values) {
     }, `update ${range}`);
 }
 
+async function clearSheetRange(range) {
+    await initializeSheets();
+    return withRetry(async () => {
+        await sheetsService.spreadsheets.values.clear({
+            spreadsheetId,
+            range,
+        });
+    }, `clear ${range}`);
+}
+
 /**
  * Deletes rows from a specified sheet.
  * @param {string} sheetName - The name of the sheet (e.g., 'EventMap').
@@ -408,4 +418,5 @@ module.exports = {
     updateEventMapping,
     deleteEventMapping,
     readSheetRows, // Exposed for runFullSyncForAllUsers might need it
+    clearSheetRange,
 };

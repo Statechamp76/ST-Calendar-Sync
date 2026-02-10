@@ -168,9 +168,114 @@ async function dedupeNonJobsThisWeekForward(options = {}) {
   return summary;
 }
 
+async function purgeNonJobsInWindow(options = {}) {
+  const {
+    startsOnOrAfter = null,
+    startsOnOrBefore = null,
+    dryRun = true,
+  } = options;
+
+  const defaults = getDefaultStartAndEnd();
+  const startIso = startsOnOrAfter || defaults.startsOnOrAfter;
+  const endIso = startsOnOrBefore || defaults.startsOnOrBefore;
+
+  const techMap = await sheets.getTechMap();
+  const enabledUsers = techMap.filter((u) => u.enabled && u.st_technician_id);
+
+  const summary = {
+    startsOnOrAfter: startIso,
+    startsOnOrBefore: endIso,
+    techniciansProcessed: 0,
+    appointmentsFound: 0,
+    appointmentsToDelete: 0,
+    deleted: 0,
+    errors: [],
+  };
+
+  for (const user of enabledUsers) {
+    summary.techniciansProcessed += 1;
+    const techId = String(user.st_technician_id);
+
+    try {
+      const pageSize = 500;
+      let page = 1;
+      let totalForTech = 0;
+      const seenIds = new Set();
+
+      while (true) {
+        const appts = await servicetitan.listNonJobs({
+          technicianId: techId,
+          startsOnOrAfter: startIso,
+          startsOnOrBefore: endIso,
+          page,
+          pageSize,
+        });
+
+        if (!appts || appts.length === 0) break;
+
+        for (const appt of appts) {
+          const id = appt && appt.id !== undefined ? String(appt.id) : null;
+          if (!id || seenIds.has(id)) continue;
+          seenIds.add(id);
+          totalForTech += 1;
+
+          summary.appointmentsFound += 1;
+          summary.appointmentsToDelete += 1;
+
+          if (!dryRun) {
+            await servicetitan.deleteNonJob(id);
+            summary.deleted += 1;
+          }
+        }
+
+        if (appts.length < pageSize) break;
+        page += 1;
+        if (page > 200) break; // safety cap
+      }
+
+      console.log('cleanup.purge.tech.complete', { techId, userUpn: user.outlook_upn, totalForTech });
+    } catch (error) {
+      summary.errors.push({
+        technicianId: techId,
+        userUpn: user.outlook_upn,
+        message: error.message,
+      });
+    }
+  }
+
+  return summary;
+}
+
+async function resetSyncState(options = {}) {
+  const {
+    startsOnOrAfter = null,
+    startsOnOrBefore = null,
+    dryRun = true,
+  } = options;
+
+  const purgeSummary = await purgeNonJobsInWindow({
+    startsOnOrAfter,
+    startsOnOrBefore,
+    dryRun,
+  });
+
+  if (!dryRun) {
+    // Clear mappings but keep headers.
+    await sheets.clearSheetRange('EventMap!A2:F');
+    await sheets.clearSheetRange('DeltaState!A2:E');
+  }
+
+  return {
+    dryRun,
+    purge: purgeSummary,
+    sheetsCleared: dryRun ? false : true,
+  };
+}
+
 module.exports = {
   dedupeNonJobsThisWeekForward,
+  purgeNonJobsInWindow,
+  resetSyncState,
   toIsoAtTzDayStart,
   toIsoAtTzDayEnd,
 };
-
