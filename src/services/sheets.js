@@ -337,6 +337,47 @@ async function findEventMapping(outlookUpn, outlookEventId) {
     return null;
 }
 
+async function findEventMappingByGraphId(outlookUpn, graphEventId) {
+    const nowMs = Date.now();
+    if (!eventMapCache.rows || nowMs - eventMapCache.loadedAtMs > CACHE_TTL_MS) {
+        const [rows, header] = await Promise.all([
+            readSheetRows('EventMap!A2:F'),
+            readSheetRows('EventMap!A1:F1'),
+        ]);
+        eventMapCache.rows = rows;
+        eventMapCache.headerRow = header[0];
+        eventMapCache.loadedAtMs = nowMs;
+    }
+
+    const rows = eventMapCache.rows;
+    const headerRowValues = eventMapCache.headerRow;
+    const upnIndex = getRequiredHeaderIndex(headerRowValues, 'outlook_upn', 'EventMap');
+    const statusIndex = getRequiredHeaderIndex(headerRowValues, 'status', 'EventMap');
+
+    const needle = `gid=${graphEventId}`;
+    let rowIndex = -1;
+    const existingEntry = rows.find((row, idx) => {
+        if (row[upnIndex] === outlookUpn && String(row[statusIndex] || '').includes(needle)) {
+            rowIndex = idx + 2;
+            return true;
+        }
+        return false;
+    });
+
+    if (existingEntry) {
+        return {
+            rowIndex: rowIndex,
+            outlook_upn: existingEntry[0],
+            outlook_event_id: existingEntry[1],
+            st_nonjob_ids_json: existingEntry[2],
+            last_hash: existingEntry[3],
+            last_synced_utc: existingEntry[4],
+            status: existingEntry[5],
+        };
+    }
+    return null;
+}
+
 /**
  * Updates or creates an event mapping entry.
  * @param {string} outlookUpn - The UPN.
@@ -415,6 +456,7 @@ module.exports = {
     getDeltaState,
     updateDeltaState,
     findEventMapping,
+    findEventMappingByGraphId,
     updateEventMapping,
     deleteEventMapping,
     readSheetRows, // Exposed for runFullSyncForAllUsers might need it

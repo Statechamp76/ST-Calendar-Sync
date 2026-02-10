@@ -8,6 +8,7 @@ function normalizeGraphEvent(event) {
 
   return {
     id: event.id,
+    iCalUId: event.iCalUId || '',
     subject: event.subject || '',
     start,
     end,
@@ -57,16 +58,33 @@ function getEventDedupeKey(event) {
   return [
     DEDUPE_KEY_VERSION,
     event.id,
+    event.iCalUId || '',
     event.lastModifiedDateTime || '',
     event.isPrivate ? 'P' : 'N',
     event.showAs || '',
     event.isAllDay ? 'A' : 'T',
     event.start || '',
     event.end || '',
+    // Include the subject so changes propagate to ST (non-private only, since private events are masked).
+    event.isPrivate ? '' : (event.subject || ''),
   ].join(':');
+}
+
+function getStableEventKey(event) {
+  // Used for EventMap keying so calendarView and delta views map to the same occurrence.
+  // Tombstones often lack start/end; callers must handle that separately.
+  const uid = String(event.iCalUId || '').trim();
+  const start = event.start || '';
+  const end = event.end || '';
+  if (uid && start && end) {
+    return `${uid}:${start}:${end}`;
+  }
+  // Fallback: Graph id + times.
+  return `${event.id || ''}:${start}:${end}`;
 }
 
 module.exports = {
   normalizeGraphEvent,
   getEventDedupeKey,
+  getStableEventKey,
 };

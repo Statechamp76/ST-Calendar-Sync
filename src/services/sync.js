@@ -3,7 +3,7 @@ const graph = require('../api/graph');
 const servicetitan = require('../api/servicetitan');
 const sheets = require('./sheets');
 const { getSecrets } = require('../utils/secrets');
-const { normalizeGraphEvent, getEventDedupeKey } = require('../utils/normalize');
+const { normalizeGraphEvent, getEventDedupeKey, getStableEventKey } = require('../utils/normalize');
 const { mapEventToServiceTitanPayloads } = require('./mapping');
 const { notifyFailure } = require('./alerts');
 const { loadConfig } = require('../config');
@@ -90,13 +90,16 @@ async function upsertServiceTitanAppointments(userConfig, event, existingMapping
 }
 
 async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
-  const existingMapping = await sheets.findEventMapping(userConfig.outlook_upn, normalizedEvent.id);
+  const stableKey = getStableEventKey(normalizedEvent);
+  const existingMapping = await sheets.findEventMapping(userConfig.outlook_upn, stableKey);
   const dedupeKey = getEventDedupeKey(normalizedEvent);
 
   // Graph delta tombstones (`@removed`) must delete any mapped ST records.
   if (normalizedEvent.isRemoved) {
-    if (existingMapping) {
-      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
+    // Tombstones usually only include Graph id; lookup via status gid=... marker.
+    const mappingByGid = await sheets.findEventMappingByGraphId(userConfig.outlook_upn, normalizedEvent.id);
+    if (mappingByGid) {
+      await deleteMappedEvent(userConfig.outlook_upn, mappingByGid.outlook_event_id, mappingByGid);
     }
     summary.eventsSkipped += 1;
     return;
@@ -110,7 +113,7 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
   // Do not sync available/free events; remove existing ST mapping if present.
   if (isAvailabilityEvent(normalizedEvent.showAs)) {
     if (existingMapping) {
-      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
+      await deleteMappedEvent(userConfig.outlook_upn, stableKey, existingMapping);
     }
     summary.eventsSkipped += 1;
     return;
@@ -120,7 +123,7 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
   // appointment for an event that no longer matches this policy, remove it.
   if (!isSyncableBusyOrOof(normalizedEvent.showAs)) {
     if (existingMapping) {
-      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
+      await deleteMappedEvent(userConfig.outlook_upn, stableKey, existingMapping);
     }
     summary.eventsSkipped += 1;
     return;
@@ -135,10 +138,10 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
   try {
     await sheets.updateEventMapping(
       userConfig.outlook_upn,
-      normalizedEvent.id,
+      stableKey,
       appointmentIds,
       dedupeKey,
-      'SYNCED',
+      `SYNCED|gid=${normalizedEvent.id}`,
       existingMapping ? existingMapping.rowIndex : null,
     );
   } catch (error) {

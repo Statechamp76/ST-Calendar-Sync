@@ -65,6 +65,7 @@ async function getCalendarWindowEvents(userUpn, pastDays, futureDays) {
   const endDateTime = now.plus({ days: futureDays }).toISO();
   const selectFields = [
     'id',
+    'iCalUId',
     'subject',
     'start',
     'end',
@@ -113,7 +114,7 @@ async function getDeltaEvents(userUpn, deltaLink = null, options = {}) {
     const params = new URLSearchParams({
       startDateTime,
       endDateTime,
-      $select: 'subject,start,end,showAs,location,id,sensitivity,bodyPreview,isAllDay,lastModifiedDateTime',
+      $select: 'subject,start,end,showAs,location,id,iCalUId,sensitivity,bodyPreview,isAllDay,lastModifiedDateTime',
     });
     url = `${baseUrl}/users/${encodeURIComponent(userUpn)}/calendarView/delta?${params.toString()}`;
   }
