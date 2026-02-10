@@ -46,16 +46,13 @@ function invalidateEventMapCache() {
  */
 async function readSheetRows(range) {
     await initializeSheets();
-    try {
+    return withRetry(async () => {
         const response = await sheetsService.spreadsheets.values.get({
             spreadsheetId,
             range,
         });
         return response.data.values || [];
-    } catch (error) {
-        console.error(`Error reading from sheet range "${range}":`, error.message);
-        throw new Error(`Failed to read from Google Sheet: ${range}`);
-    }
+    }, `read ${range}`);
 }
 
 /**
@@ -66,7 +63,7 @@ async function readSheetRows(range) {
  */
 async function appendSheetRow(range, rowData) {
     await initializeSheets();
-    try {
+    return withRetry(async () => {
         await sheetsService.spreadsheets.values.append({
             spreadsheetId,
             range,
@@ -75,10 +72,7 @@ async function appendSheetRow(range, rowData) {
                 values: [rowData],
             },
         });
-    } catch (error) {
-        console.error(`Error appending to sheet range "${range}":`, error.message);
-        throw new Error(`Failed to append row to Google Sheet: ${range}`);
-    }
+    }, `append ${range}`);
 }
 
 /**
@@ -89,7 +83,7 @@ async function appendSheetRow(range, rowData) {
  */
 async function updateSheetRange(range, values) {
     await initializeSheets();
-    try {
+    return withRetry(async () => {
         await sheetsService.spreadsheets.values.update({
             spreadsheetId,
             range,
@@ -98,10 +92,7 @@ async function updateSheetRange(range, values) {
                 values: values,
             },
         });
-    } catch (error) {
-        console.error(`Error updating sheet range "${range}":`, error.message);
-        throw new Error(`Failed to update Google Sheet: ${range}`);
-    }
+    }, `update ${range}`);
 }
 
 /**
@@ -113,7 +104,7 @@ async function updateSheetRange(range, values) {
  */
 async function deleteSheetRows(sheetName, startRowIndex, endRowIndex) {
     await initializeSheets();
-    try {
+    return withRetry(async () => {
         // Need to get the sheetId first
         const metadata = await sheetsService.spreadsheets.get({
             spreadsheetId,
@@ -140,10 +131,58 @@ async function deleteSheetRows(sheetName, startRowIndex, endRowIndex) {
                 }],
             },
         });
-    } catch (error) {
-        console.error(`Error deleting rows from sheet "${sheetName}" (rows ${startRowIndex}-${endRowIndex}):`, error.message);
-        throw new Error(`Failed to delete rows from Google Sheet: ${sheetName}`);
+    }, `delete rows ${sheetName} ${startRowIndex}-${endRowIndex}`);
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRetryableCode(error) {
+    // googleapis errors often include `code` and a structured response.
+    if (error && typeof error.code === 'number') return error.code;
+    const status = error?.response?.status;
+    if (typeof status === 'number') return status;
+    return null;
+}
+
+function isRetryableSheetsError(error) {
+    const code = getRetryableCode(error);
+    if (code === 429) return true;
+    if (code >= 500 && code <= 599) return true;
+    const msg = String(error?.message || '').toLowerCase();
+    if (msg.includes('quota')) return true;
+    if (msg.includes('rate limit')) return true;
+    if (msg.includes('backend error')) return true;
+    return false;
+}
+
+async function withRetry(fn, label) {
+    const maxAttempts = 6;
+    let lastErr = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastErr = error;
+            const retryable = isRetryableSheetsError(error);
+            const code = getRetryableCode(error);
+            if (!retryable || attempt === maxAttempts) {
+                const details = code ? `code=${code}` : 'code=unknown';
+                throw new Error(`Google Sheets ${label} failed (${details}): ${error.message}`);
+            }
+
+            // Exponential backoff with jitter.
+            const base = Math.min(10_000, 500 * (2 ** (attempt - 1)));
+            const jitter = Math.floor(Math.random() * 250);
+            const waitMs = base + jitter;
+            console.warn('sheets.retry', { label, attempt, waitMs, code });
+            await sleep(waitMs);
+        }
     }
+
+    throw lastErr;
 }
 
 // --- Specific Data Access Helpers ---

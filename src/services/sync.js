@@ -132,14 +132,32 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
   }
 
   const appointmentIds = await upsertServiceTitanAppointments(userConfig, normalizedEvent, existingMapping);
-  await sheets.updateEventMapping(
-    userConfig.outlook_upn,
-    normalizedEvent.id,
-    appointmentIds,
-    dedupeKey,
-    'SYNCED',
-    existingMapping ? existingMapping.rowIndex : null,
-  );
+  try {
+    await sheets.updateEventMapping(
+      userConfig.outlook_upn,
+      normalizedEvent.id,
+      appointmentIds,
+      dedupeKey,
+      'SYNCED',
+      existingMapping ? existingMapping.rowIndex : null,
+    );
+  } catch (error) {
+    // If we created ST records but could not record the mapping, delete the ST records so we don't
+    // create orphan duplicates on the next run.
+    if (!existingMapping) {
+      for (const appointmentId of appointmentIds) {
+        try {
+          await servicetitan.deleteNonJob(appointmentId);
+        } catch (deleteError) {
+          console.warn('sync.mapping_failed.rollback.delete_failed', {
+            appointmentId,
+            message: deleteError.message,
+          });
+        }
+      }
+    }
+    throw error;
+  }
   summary.eventsUpserted += 1;
 }
 

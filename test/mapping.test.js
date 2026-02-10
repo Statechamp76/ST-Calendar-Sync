@@ -10,6 +10,7 @@ test('mapEventToServiceTitanPayloads maps single block event', () => {
   const event = {
     subject: 'Maintenance',
     isPrivate: false,
+    showAs: 'busy',
     start: '2026-02-10T16:00:00.000Z',
     end: '2026-02-10T17:30:00.000Z',
   };
@@ -20,7 +21,7 @@ test('mapEventToServiceTitanPayloads maps single block event', () => {
   assert.equal(payloads[0].technicianId, '100');
   assert.ok(!('timesheetCodeId' in payloads[0]));
   assert.equal(payloads[0].duration, '01:30:00');
-  assert.equal(payloads[0].name, 'Maintenance');
+  assert.equal(payloads[0].name, 'Busy');
   assert.equal(payloads[0].showOnTechnicianSchedule, true);
   assert.equal(payloads[0].clearDispatchBoard, true);
   assert.equal(payloads[0].removeTechnicianFromCapacityPlanning, true);
@@ -35,6 +36,7 @@ test('mapEventToServiceTitanPayloads always disables timesheet requirement', () 
   const event = {
     subject: 'Maintenance',
     isPrivate: false,
+    showAs: 'busy',
     start: '2026-02-10T16:00:00.000Z',
     end: '2026-02-10T17:30:00.000Z',
   };
@@ -52,6 +54,7 @@ test('mapEventToServiceTitanPayloads masks private event subject', () => {
   const event = {
     subject: 'Confidential',
     isPrivate: true,
+    showAs: 'busy',
     start: '2026-02-10T16:00:00.000Z',
     end: '2026-02-10T16:30:00.000Z',
   };

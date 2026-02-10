@@ -1,5 +1,7 @@
 const { DateTime } = require('luxon');
 
+const DEDUPE_KEY_VERSION = 'v2';
+
 function normalizeGraphEvent(event) {
   const start = normalizeDateTime(event.start);
   const end = normalizeDateTime(event.end);
@@ -53,6 +55,7 @@ function getEventDedupeKey(event) {
   // Include key fields so logic changes (e.g., private masking) can force an update even when
   // lastModifiedDateTime is unchanged.
   return [
+    DEDUPE_KEY_VERSION,
     event.id,
     event.lastModifiedDateTime || '',
     event.isPrivate ? 'P' : 'N',

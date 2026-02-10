@@ -1,8 +1,17 @@
 const { DateTime, Interval } = require('luxon');
 const { splitMultiDayEvent, TIMEZONE } = require('../utils/time');
 
+function getMaskedSubject(event) {
+  const showAs = String(event.showAs || 'busy').toLowerCase();
+  // Policy: never copy Outlook subjects into ServiceTitan. This is a schedule blocker only.
+  if (showAs === 'oof') {
+    return 'Out of Office';
+  }
+  return 'Busy';
+}
+
 function mapEventToServiceTitanPayloads(event, userConfig) {
-  const subject = event.isPrivate ? 'Busy' : (event.subject || 'Calendar Event');
+  const subject = getMaskedSubject(event);
   const eventBlocks = splitMultiDayEvent(event.start, event.end);
 
   // Policy: Outlook is the source of truth; these blocks are always non-timesheet and always visible
