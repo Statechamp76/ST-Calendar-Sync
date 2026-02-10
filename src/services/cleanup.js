@@ -173,6 +173,7 @@ async function purgeNonJobsInWindow(options = {}) {
     startsOnOrAfter = null,
     startsOnOrBefore = null,
     dryRun = true,
+    includeDisabled = true,
   } = options;
 
   const defaults = getDefaultStartAndEnd();
@@ -180,7 +181,10 @@ async function purgeNonJobsInWindow(options = {}) {
   const endIso = startsOnOrBefore || defaults.startsOnOrBefore;
 
   const techMap = await sheets.getTechMap();
-  const enabledUsers = techMap.filter((u) => u.enabled && u.st_technician_id);
+  const users = techMap.filter((u) => {
+    if (!u.st_technician_id) return false;
+    return includeDisabled ? true : Boolean(u.enabled);
+  });
 
   const summary = {
     startsOnOrAfter: startIso,
@@ -192,7 +196,7 @@ async function purgeNonJobsInWindow(options = {}) {
     errors: [],
   };
 
-  for (const user of enabledUsers) {
+  for (const user of users) {
     summary.techniciansProcessed += 1;
     const techId = String(user.st_technician_id);
 
@@ -252,12 +256,14 @@ async function resetSyncState(options = {}) {
     startsOnOrBefore = null,
     dryRun = true,
     skipSheetsClear = false,
+    includeDisabled = true,
   } = options;
 
   const purgeSummary = await purgeNonJobsInWindow({
     startsOnOrAfter,
     startsOnOrBefore,
     dryRun,
+    includeDisabled,
   });
 
   let sheetsCleared = false;
