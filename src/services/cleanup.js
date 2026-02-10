@@ -251,6 +251,7 @@ async function resetSyncState(options = {}) {
     startsOnOrAfter = null,
     startsOnOrBefore = null,
     dryRun = true,
+    skipSheetsClear = false,
   } = options;
 
   const purgeSummary = await purgeNonJobsInWindow({
@@ -259,16 +260,24 @@ async function resetSyncState(options = {}) {
     dryRun,
   });
 
-  if (!dryRun) {
-    // Clear mappings but keep headers.
-    await sheets.clearSheetRange('EventMap!A2:F');
-    await sheets.clearSheetRange('DeltaState!A2:E');
+  let sheetsCleared = false;
+  const errors = [];
+  if (!dryRun && !skipSheetsClear) {
+    try {
+      // Clear mappings but keep headers.
+      await sheets.clearSheetRange('EventMap!A2:F');
+      await sheets.clearSheetRange('DeltaState!A2:E');
+      sheetsCleared = true;
+    } catch (error) {
+      errors.push({ message: error.message });
+    }
   }
 
   return {
     dryRun,
     purge: purgeSummary,
-    sheetsCleared: dryRun ? false : true,
+    sheetsCleared,
+    errors,
   };
 }
 

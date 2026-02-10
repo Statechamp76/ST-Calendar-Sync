@@ -28,6 +28,12 @@ app.post('/graph/notifications', async (req, res) => {
     // A robust implementation would verify the origin of the request (e.g., using clientState)
     // and handle decryption of encrypted notifications if configured.
     try {
+        if (config.maintenanceMode) {
+            console.warn('maintenance_mode: ignoring graph notifications publish');
+            res.status(202).send();
+            return;
+        }
+
         if (!req.body || !Array.isArray(req.body.value)) {
             res.status(400).send('Bad Request: Invalid notification payload.');
             return;
@@ -67,6 +73,12 @@ app.post('/graph/notifications', async (req, res) => {
 
 // Worker endpoint triggered by Pub/Sub push subscription
 app.post('/sync/user', requireOidcAuth, async (req, res) => {
+    if (config.maintenanceMode) {
+        console.warn('maintenance_mode: ignoring /sync/user');
+        res.status(204).send();
+        return;
+    }
+
     // Pub/Sub push messages arrive in the request body as a JSON object
     // containing a 'message' field which has the base64 encoded data.
     if (!req.body || !req.body.message || !req.body.message.data) {
@@ -272,6 +284,7 @@ app.post('/cleanup/reset', requireOidcAuth, async (req, res) => {
             startsOnOrAfter: body.startsOnOrAfter || null,
             startsOnOrBefore: body.startsOnOrBefore || null,
             dryRun,
+            skipSheetsClear: body.skipSheetsClear === true,
         });
         console.log('cleanup.reset.complete', summary);
         res.status(200).json(summary);
