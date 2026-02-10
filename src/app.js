@@ -250,6 +250,7 @@ app.post('/cleanup/deduplicate', requireOidcAuth, async (req, res) => {
             startsOnOrBefore: body.startsOnOrBefore || null,
             dryRun,
         });
+        console.log('cleanup.dedupe.complete', summary);
         res.status(200).json(summary);
     } catch (error) {
         console.error('Deduplicate failed:', error);
