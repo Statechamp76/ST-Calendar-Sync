@@ -32,13 +32,14 @@ async function getGraphAccessToken() {
   return tokenResponse.accessToken;
 }
 
-async function graphRequest(method, url, body) {
+async function graphRequest(method, url, body, extraHeaders = null) {
   const token = await getGraphAccessToken();
   const response = await fetch(url, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      ...(extraHeaders || {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -95,7 +96,11 @@ async function getCalendarWindowEvents(userUpn, pastDays, futureDays) {
   return events;
 }
 
-async function getDeltaEvents(userUpn, deltaLink = null) {
+async function getDeltaEvents(userUpn, deltaLink = null, options = {}) {
+  const {
+    pastDays = 30,
+    futureDays = 90,
+  } = options;
   const baseUrl = 'https://graph.microsoft.com/v1.0';
   let url;
 
@@ -103,23 +108,23 @@ async function getDeltaEvents(userUpn, deltaLink = null) {
     url = deltaLink;
   } else {
     const now = DateTime.utc();
-    const startDateTime = now.minus({ days: 30 }).toISO();
-    const endDateTime = now.plus({ days: 90 }).toISO();
+    const startDateTime = now.minus({ days: pastDays }).toISO();
+    const endDateTime = now.plus({ days: futureDays }).toISO();
     const params = new URLSearchParams({
       startDateTime,
       endDateTime,
       $select: 'subject,start,end,showAs,location,id,sensitivity,bodyPreview,isAllDay,lastModifiedDateTime',
-      $top: '50',
     });
     url = `${baseUrl}/users/${encodeURIComponent(userUpn)}/calendarView/delta?${params.toString()}`;
   }
 
   const allEvents = [];
-  let response = await graphRequest('GET', url);
+  // NOTE: Graph rejects $top for calendarView/delta; page size is controlled by Prefer: odata.maxpagesize.
+  let response = await graphRequest('GET', url, null, { Prefer: 'odata.maxpagesize=50' });
   allEvents.push(...(response.value || []));
 
   while (response['@odata.nextLink']) {
-    response = await graphRequest('GET', response['@odata.nextLink']);
+    response = await graphRequest('GET', response['@odata.nextLink'], null, { Prefer: 'odata.maxpagesize=50' });
     allEvents.push(...(response.value || []));
   }
 
@@ -135,7 +140,8 @@ function getSubscriptionResource(userUpn) {
 
 async function findSubscriptionByResource(resource, clientState) {
   const baseUrl = 'https://graph.microsoft.com/v1.0/subscriptions';
-  let url = `${baseUrl}?$top=100`;
+  // Some tenants reject $top on this endpoint.
+  let url = baseUrl;
 
   while (url) {
     const response = await graphRequest('GET', url);

@@ -1,11 +1,15 @@
 const express = require('express');
 const { PubSub } = require('@google-cloud/pubsub');
-const syncService = require('./services/sync'); // Will be implemented later
+const syncService = require('./services/sync');
 const { requireOidcAuth } = require('./middleware/auth');
 const { notifyFailure } = require('./services/alerts');
+const { getSecrets } = require('./utils/secrets');
+const { loadConfig } = require('./config');
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
+
+const config = loadConfig();
 
 // --- Endpoints ---
 
@@ -28,16 +32,23 @@ app.post('/graph/notifications', async (req, res) => {
             return;
         }
 
+        const secrets = await getSecrets(['GRAPH_CLIENT_STATE']);
+        const expectedClientState = secrets.GRAPH_CLIENT_STATE;
         const pubsub = new PubSub();
-        const topicName = 'graph-notifications'; // Ensure this topic exists in GCP
+        const topicName = config.pubsubTopic; // Must exist in GCP
 
         // The notification body from Graph can contain multiple notifications
         for (const notification of req.body.value) {
+            if (!notification || notification.clientState !== expectedClientState) {
+                console.warn('Ignoring Graph notification with invalid clientState.');
+                continue;
+            }
+
             // Extract user identifier (UPN) from the resource path.
             // Example resource: 'users/someone@example.com/events/...'
-            const resource = notification.resource;
-            const upnMatch = resource.match(/users\/(.*?)\/events/);
-            const userUpn = upnMatch ? upnMatch[1] : null; 
+            const resource = String(notification.resource || '');
+            const upnMatch = resource.match(/users\/([^/]+)\/events/i);
+            const userUpn = upnMatch ? decodeURIComponent(upnMatch[1]) : null;
 
             if (userUpn) {
                 const messageId = await pubsub.topic(topicName).publishMessage({ json: { upn: userUpn } });
@@ -54,7 +65,7 @@ app.post('/graph/notifications', async (req, res) => {
 });
 
 // Worker endpoint triggered by Pub/Sub push subscription
-app.post('/sync/user', async (req, res) => {
+app.post('/sync/user', requireOidcAuth, async (req, res) => {
     // Pub/Sub push messages arrive in the request body as a JSON object
     // containing a 'message' field which has the base64 encoded data.
     if (!req.body || !req.body.message || !req.body.message.data) {
@@ -65,12 +76,24 @@ app.post('/sync/user', async (req, res) => {
 
     try {
         const messageData = Buffer.from(req.body.message.data, 'base64').toString('utf-8');
-        const message = JSON.parse(messageData);
-        const userUpn = message.upn;
+        let message;
+        try {
+            message = JSON.parse(messageData);
+        } catch {
+            // Be tolerant of incorrectly-escaped JSON (or plain strings) so Pub/Sub doesn't retry forever.
+            try {
+                message = JSON.parse(messageData.replace(/\\"/g, '"'));
+            } catch {
+                message = messageData;
+            }
+        }
+
+        const userUpn = typeof message === 'string' ? message : message.upn;
 
         if (!userUpn) {
             console.error('Received Pub/Sub message with missing UPN:', message);
-            res.status(400).send('Bad Request: Missing UPN in message.');
+            // Ack the message to avoid endless retries on bad payloads.
+            res.status(204).send();
             return;
         }
         
@@ -89,12 +112,12 @@ app.post('/sync/user', async (req, res) => {
 });
 
 // Endpoint for full nightly sync (Cloud Scheduler)
-app.post('/sync/all', async (req, res) => {
+app.post('/sync/all', requireOidcAuth, async (req, res) => {
     try {
         console.log('Initiating full sync for all enabled users.');
         // This endpoint will iterate through TechMap and publish messages to Pub/Sub
         // for each enabled user, similar to the webhook, but for a full delta sync.
-        await syncService.runFullSyncForAllUsers(); // Will be implemented in sync.js
+        await syncService.runFullSyncForAllUsers();
         res.status(202).send('Full sync initiated.');
     } catch (error) {
         console.error('Error initiating full sync:', error);
@@ -103,11 +126,11 @@ app.post('/sync/all', async (req, res) => {
 });
 
 // Endpoint for renewing Microsoft Graph subscriptions (Cloud Scheduler)
-app.post('/graph/subscriptions/renew', async (req, res) => {
+app.post('/graph/subscriptions/renew', requireOidcAuth, async (req, res) => {
     try {
         console.log('Attempting to renew Microsoft Graph subscriptions.');
         // This endpoint will retrieve existing subscriptions and renew them.
-        await syncService.renewGraphSubscriptions(); // Will be implemented in sync.js or graph.js
+        await syncService.renewGraphSubscriptions();
         res.status(200).send('Subscription renewal process started.');
     } catch (error) {
         console.error('Error renewing Graph subscriptions:', error);
@@ -133,6 +156,35 @@ app.post('/run-sync', requireOidcAuth, async (req, res) => {
     } catch (error) {
         console.error('Run sync failed:', error);
         await notifyFailure('ST Calendar Sync: /run-sync failed', {
+            message: error.message,
+        });
+        res.status(500).json({
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            calendarsProcessed: 0,
+            eventsFetched: 0,
+            eventsUpserted: 0,
+            eventsSkipped: 0,
+            errors: [{ message: error.message }],
+        });
+    }
+});
+
+// One-time backfill: pull last 30 days of calendarView for all enabled users and upsert only busy/OOF.
+// Does not modify Outlook; it only creates/updates/deletes ServiceTitan non-job appointments + sheet mappings.
+app.post('/backfill/last-30-days', requireOidcAuth, async (req, res) => {
+    try {
+        const summary = await syncService.runBackfillLast30DaysAllUsers();
+        if (summary.errors && summary.errors.length > 0) {
+            await notifyFailure('ST Calendar Sync: /backfill/last-30-days completed with errors', {
+                errorCount: summary.errors.length,
+                sample: summary.errors.slice(0, 5),
+            });
+        }
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Backfill last 30 days failed:', error);
+        await notifyFailure('ST Calendar Sync: /backfill/last-30-days failed', {
             message: error.message,
         });
         res.status(500).json({

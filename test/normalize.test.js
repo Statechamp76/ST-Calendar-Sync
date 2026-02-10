@@ -40,9 +40,17 @@ test('getEventDedupeKey uses id + lastModifiedDateTime', () => {
   const key = getEventDedupeKey({
     id: 'event-id',
     lastModifiedDateTime: '2026-02-01T15:30:00.000Z',
+    isPrivate: false,
+    showAs: 'busy',
+    isAllDay: false,
+    start: '2026-02-01T10:00:00.000Z',
+    end: '2026-02-01T11:00:00.000Z',
   });
 
-  assert.equal(key, 'event-id:2026-02-01T15:30:00.000Z');
+  assert.equal(
+    key,
+    'event-id:2026-02-01T15:30:00.000Z:N:busy:T:2026-02-01T10:00:00.000Z:2026-02-01T11:00:00.000Z',
+  );
 });
 
 test('normalizeGraphEvent marks tombstone events', () => {
