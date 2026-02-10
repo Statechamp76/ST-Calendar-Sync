@@ -1,6 +1,6 @@
 const { DateTime } = require('luxon');
 
-const DEDUPE_KEY_VERSION = 'v2';
+const DEDUPE_KEY_VERSION = 'v3';
 
 function normalizeGraphEvent(event) {
   const start = normalizeDateTime(event.start);

@@ -49,7 +49,7 @@ test('getEventDedupeKey uses id + lastModifiedDateTime', () => {
 
   assert.equal(
     key,
-    'v2:event-id:2026-02-01T15:30:00.000Z:N:busy:T:2026-02-01T10:00:00.000Z:2026-02-01T11:00:00.000Z',
+    'v3:event-id:2026-02-01T15:30:00.000Z:N:busy:T:2026-02-01T10:00:00.000Z:2026-02-01T11:00:00.000Z',
   );
 });
 

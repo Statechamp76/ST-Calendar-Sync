@@ -21,7 +21,7 @@ test('mapEventToServiceTitanPayloads maps single block event', () => {
   assert.equal(payloads[0].technicianId, '100');
   assert.ok(!('timesheetCodeId' in payloads[0]));
   assert.equal(payloads[0].duration, '01:30:00');
-  assert.equal(payloads[0].name, 'Busy');
+  assert.equal(payloads[0].name, 'Maintenance');
   assert.equal(payloads[0].showOnTechnicianSchedule, true);
   assert.equal(payloads[0].clearDispatchBoard, true);
   assert.equal(payloads[0].removeTechnicianFromCapacityPlanning, true);
