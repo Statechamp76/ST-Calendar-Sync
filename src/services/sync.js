@@ -6,6 +6,9 @@ const { getSecrets } = require('../utils/secrets');
 const { normalizeGraphEvent, getEventDedupeKey } = require('../utils/normalize');
 const { mapEventToServiceTitanPayloads } = require('./mapping');
 const { notifyFailure } = require('./alerts');
+const { loadConfig } = require('../config');
+
+const config = loadConfig();
 
 function createSummary() {
   return {
@@ -35,12 +38,17 @@ function isAvailabilityEvent(showAs) {
   return value === 'free' || value === 'available';
 }
 
+function isSyncableBusyOrOof(showAs) {
+  const value = (showAs || '').toLowerCase();
+  return value === 'busy' || value === 'oof';
+}
+
 async function deleteMappedEvent(userUpn, outlookEventId, existingMapping) {
   const existingIds = parseJsonArray(existingMapping.st_nonjob_ids_json);
   for (const appointmentId of existingIds) {
     await servicetitan.deleteNonJob(appointmentId);
   }
-  await sheets.deleteEventMapping(userUpn, outlookEventId);
+  await sheets.deleteEventMapping(userUpn, outlookEventId, existingMapping);
 }
 
 async function upsertServiceTitanAppointments(userConfig, event, existingMapping) {
@@ -56,7 +64,16 @@ async function upsertServiceTitanAppointments(userConfig, event, existingMapping
       try {
         await servicetitan.updateNonJob(appointmentId, payload);
       } catch (error) {
+        const previousId = appointmentId;
         appointmentId = await servicetitan.createNonJob(payload);
+        try {
+          await servicetitan.deleteNonJob(previousId);
+        } catch (deleteError) {
+          console.warn('sync.upsert.reconcile.delete_previous_failed', {
+            appointmentId: previousId,
+            message: deleteError.message,
+          });
+        }
       }
     } else {
       appointmentId = await servicetitan.createNonJob(payload);
@@ -92,6 +109,16 @@ async function processNormalizedEvent(userConfig, normalizedEvent, summary) {
 
   // Do not sync available/free events; remove existing ST mapping if present.
   if (isAvailabilityEvent(normalizedEvent.showAs)) {
+    if (existingMapping) {
+      await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
+    }
+    summary.eventsSkipped += 1;
+    return;
+  }
+
+  // Only sync events that are explicitly Busy or Out of Office. If we previously created an ST
+  // appointment for an event that no longer matches this policy, remove it.
+  if (!isSyncableBusyOrOof(normalizedEvent.showAs)) {
     if (existingMapping) {
       await deleteMappedEvent(userConfig.outlook_upn, normalizedEvent.id, existingMapping);
     }
@@ -157,7 +184,10 @@ async function runDeltaSyncForUser(userUpn, userConfigOverride = null) {
   }
 
   const deltaState = await sheets.getDeltaState(userUpn);
-  const graphResponse = await graph.getDeltaEvents(userUpn, deltaState.delta_link);
+  const graphResponse = await graph.getDeltaEvents(userUpn, deltaState.delta_link, {
+    pastDays: config.syncWindowPastDays,
+    futureDays: config.syncWindowFutureDays,
+  });
   const { events, nextDeltaLink } = graphResponse;
   summary.calendarsProcessed = 1;
   summary.eventsFetched = events.length;
@@ -170,11 +200,77 @@ async function runDeltaSyncForUser(userUpn, userConfigOverride = null) {
   return summary;
 }
 
+async function runBackfillLast30DaysForUser(userUpn, userConfigOverride = null) {
+  const summary = createSummary();
+  console.log('sync.backfill30.start', { userUpn });
+
+  let userConfig = userConfigOverride;
+  if (!userConfig) {
+    const techMap = await sheets.getTechMap();
+    userConfig = techMap.find((user) => user.outlook_upn === userUpn && user.enabled);
+  }
+
+  if (!userConfig) {
+    console.log('sync.backfill30.skipped.user_not_enabled', { userUpn });
+    summary.finishedAt = new Date().toISOString();
+    return summary;
+  }
+
+  // Full pull (not delta): last 30 days only.
+  const events = await graph.getCalendarWindowEvents(userUpn, 30, 0);
+  summary.calendarsProcessed = 1;
+  summary.eventsFetched = events.length;
+
+  await processUserEvents(userConfig, events, summary);
+  summary.finishedAt = new Date().toISOString();
+
+  console.log('sync.backfill30.complete', summary);
+  return summary;
+}
+
+async function runBackfillLast30DaysAllUsers() {
+  const summary = createSummary();
+  console.log('sync.backfill30.all.start');
+
+  const techMap = await sheets.getTechMap();
+  const enabledUsers = techMap.filter((user) => user.enabled);
+
+  for (const userConfig of enabledUsers) {
+    try {
+      const userSummary = await runBackfillLast30DaysForUser(userConfig.outlook_upn, userConfig);
+      summary.calendarsProcessed += userSummary.calendarsProcessed;
+      summary.eventsFetched += userSummary.eventsFetched;
+      summary.eventsUpserted += userSummary.eventsUpserted;
+      summary.eventsSkipped += userSummary.eventsSkipped;
+      summary.errors.push(...userSummary.errors);
+      console.log('sync.backfill30.user.complete', {
+        userUpn: userConfig.outlook_upn,
+        eventsFetched: userSummary.eventsFetched,
+        eventsUpserted: userSummary.eventsUpserted,
+        eventsSkipped: userSummary.eventsSkipped,
+      });
+    } catch (error) {
+      summary.errors.push({
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+      console.error('sync.backfill30.user.error', {
+        userUpn: userConfig.outlook_upn,
+        message: error.message,
+      });
+    }
+  }
+
+  summary.finishedAt = new Date().toISOString();
+  console.log('sync.backfill30.all.complete', summary);
+  return summary;
+}
+
 async function runFullSyncForAllUsers() {
   console.log('sync.full.enqueue.start');
   const techMap = await sheets.getTechMap();
   const pubsub = new PubSub();
-  const topicName = 'graph-notifications';
+  const topicName = config.pubsubTopic;
 
   for (const userConfig of techMap) {
     if (!userConfig.enabled) {
@@ -207,10 +303,10 @@ async function renewGraphSubscriptions() {
         userUpn: userConfig.outlook_upn,
         message: error.message,
       });
-      console.error('sync.subscriptions.renew.error', {
+      console.error('sync.subscriptions.renew.error', JSON.stringify({
         userUpn: userConfig.outlook_upn,
         message: error.message,
-      });
+      }));
     }
   }
   if (errors.length > 0) {
@@ -265,6 +361,8 @@ async function runSyncCycle() {
 
 module.exports = {
   runDeltaSyncForUser,
+  runBackfillLast30DaysForUser,
+  runBackfillLast30DaysAllUsers,
   runFullSyncForAllUsers,
   renewGraphSubscriptions,
   runSyncCycle,

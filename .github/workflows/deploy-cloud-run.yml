@@ -35,5 +35,5 @@ jobs:
             --region "${{ vars.CLOUD_RUN_REGION }}" \
             --project "${{ vars.GCP_PROJECT_ID }}" \
             --platform managed \
-            --no-allow-unauthenticated \
+            --allow-unauthenticated \
             --quiet

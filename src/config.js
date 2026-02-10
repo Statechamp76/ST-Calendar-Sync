@@ -26,6 +26,7 @@ function loadConfig() {
     syncWindowPastDays: parsePositiveInt(process.env.SYNC_WINDOW_PAST_DAYS, 30, 'SYNC_WINDOW_PAST_DAYS'),
     syncWindowFutureDays: parsePositiveInt(process.env.SYNC_WINDOW_FUTURE_DAYS, 90, 'SYNC_WINDOW_FUTURE_DAYS'),
     runSyncAudience: process.env.RUN_SYNC_AUDIENCE || '',
+    pubsubTopic: (process.env.PUBSUB_TOPIC || 'outlook-change-notifications').trim() || 'outlook-change-notifications',
     graphClientId: process.env.GRAPH_CLIENT_ID || '',
     graphClientSecret: process.env.GRAPH_CLIENT_SECRET || '',
     graphTenantId: process.env.GRAPH_TENANT_ID || '',

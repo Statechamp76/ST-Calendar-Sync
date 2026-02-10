@@ -1,22 +1,20 @@
 const { DateTime, Interval } = require('luxon');
 const { splitMultiDayEvent, TIMEZONE } = require('../utils/time');
 
-function parseBool(value, defaultValue) {
-  if (value === undefined || value === null || value === '') {
-    return defaultValue;
-  }
-  const normalized = String(value).trim().toLowerCase();
-  return normalized === '1' || normalized === 'true' || normalized === 'yes';
-}
-
 function mapEventToServiceTitanPayloads(event, userConfig) {
   const subject = event.isPrivate ? 'Busy' : (event.subject || 'Calendar Event');
   const eventBlocks = splitMultiDayEvent(event.start, event.end);
-  const requireTimesheet = parseBool(process.env.ST_REQUIRE_TIMESHEET, false);
-  const showOnTechnicianSchedule = parseBool(process.env.ST_SHOW_ON_TECH_SCHEDULE, true);
-  const clearDispatchBoard = parseBool(process.env.ST_CLEAR_DISPATCH_BOARD, true);
-  const clearTechnicianView = parseBool(process.env.ST_CLEAR_TECHNICIAN_VIEW, false);
-  const removeFromCapacity = parseBool(process.env.ST_REMOVE_FROM_CAPACITY, true);
+
+  // Policy: Outlook is the source of truth; these blocks are always non-timesheet and always visible
+  // on the technician mobile schedule.
+  const showOnTechnicianSchedule = true;
+  // NOTE: Some ServiceTitan tenants reject a numeric 0 timesheet code. To keep "Needs a Timesheet?"
+  // unchecked, we omit `timesheetCodeId` entirely.
+
+  // Keep these as configuration knobs; they affect where the blocks show up in ST.
+  const clearDispatchBoard = (String(process.env.ST_CLEAR_DISPATCH_BOARD || '').trim().toLowerCase() === 'false') ? false : true;
+  const clearTechnicianView = (String(process.env.ST_CLEAR_TECHNICIAN_VIEW || '').trim().toLowerCase() === 'true') ? true : false;
+  const removeFromCapacity = (String(process.env.ST_REMOVE_FROM_CAPACITY || '').trim().toLowerCase() === 'false') ? false : true;
 
   return eventBlocks.map((block) => {
     const startDateTime = DateTime.fromISO(block.start, { zone: TIMEZONE });
@@ -25,7 +23,6 @@ function mapEventToServiceTitanPayloads(event, userConfig) {
 
     return {
       technicianId: userConfig.st_technician_id,
-      timesheetCodeId: requireTimesheet ? userConfig.st_timesheet_code_id : 0,
       start: startDateTime.toISO(),
       duration,
       name: subject,

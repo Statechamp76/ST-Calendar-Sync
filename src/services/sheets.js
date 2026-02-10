@@ -5,6 +5,15 @@ const { DateTime } = require('luxon');
 let sheetsService;
 let spreadsheetId;
 
+// Simple in-memory cache to reduce Sheets read quota pressure during large sync runs.
+// A longer TTL is intentional; this service is the sole writer for these sheets in normal operation.
+const CACHE_TTL_MS = 5 * 60_000;
+let eventMapCache = {
+    loadedAtMs: 0,
+    headerRow: null,
+    rows: null,
+};
+
 // --- Initialization ---
 async function initializeSheets() {
     if (sheetsService) return; // Already initialized
@@ -20,6 +29,12 @@ async function initializeSheets() {
     const authClient = await auth.getClient();
     sheetsService = google.sheets({ version: 'v4', auth: authClient });
     console.log('Google Sheets API client initialized.');
+}
+
+function invalidateEventMapCache() {
+    eventMapCache.loadedAtMs = 0;
+    eventMapCache.headerRow = null;
+    eventMapCache.rows = null;
 }
 
 // --- Generic Sheet Read/Write Helpers ---
@@ -147,6 +162,19 @@ async function getTechMap() {
     }));
 }
 
+function getRequiredHeaderIndex(headerRowValues, headerName, sheetName) {
+    if (!Array.isArray(headerRowValues) || headerRowValues.length === 0) {
+        throw new Error(`Missing header row in ${sheetName}.`);
+    }
+
+    const index = headerRowValues.indexOf(headerName);
+    if (index === -1) {
+        throw new Error(`Missing required header "${headerName}" in ${sheetName}.`);
+    }
+
+    return index;
+}
+
 /**
  * Retrieves delta state for a specific UPN.
  * @param {string} outlookUpn - The UPN to retrieve delta state for.
@@ -155,7 +183,7 @@ async function getTechMap() {
 async function getDeltaState(outlookUpn) {
     const rows = await readSheetRows('DeltaState!A2:E'); // Assuming headers in A1:E1
     const headerRowValues = (await readSheetRows('DeltaState!A1:E1'))[0];
-    const upnIndex = headerRowValues.indexOf('outlook_upn');
+    const upnIndex = getRequiredHeaderIndex(headerRowValues, 'outlook_upn', 'DeltaState');
 
     let rowIndex = -1;
     const existingEntry = rows.find((row, idx) => {
@@ -221,10 +249,21 @@ async function updateDeltaState(outlookUpn, newDeltaLink, existingRowIndex) {
  * @returns {Promise<object | null>} The event mapping object with its row index, or null if not found.
  */
 async function findEventMapping(outlookUpn, outlookEventId) {
-    const rows = await readSheetRows('EventMap!A2:F'); // Assuming headers in A1:F1
-    const headerRowValues = (await readSheetRows('EventMap!A1:F1'))[0];
-    const upnIndex = headerRowValues.indexOf('outlook_upn');
-    const eventIdIndex = headerRowValues.indexOf('outlook_event_id');
+    const nowMs = Date.now();
+    if (!eventMapCache.rows || nowMs - eventMapCache.loadedAtMs > CACHE_TTL_MS) {
+        const [rows, header] = await Promise.all([
+            readSheetRows('EventMap!A2:F'),
+            readSheetRows('EventMap!A1:F1'),
+        ]);
+        eventMapCache.rows = rows;
+        eventMapCache.headerRow = header[0];
+        eventMapCache.loadedAtMs = nowMs;
+    }
+
+    const rows = eventMapCache.rows;
+    const headerRowValues = eventMapCache.headerRow;
+    const upnIndex = getRequiredHeaderIndex(headerRowValues, 'outlook_upn', 'EventMap');
+    const eventIdIndex = getRequiredHeaderIndex(headerRowValues, 'outlook_event_id', 'EventMap');
 
     let rowIndex = -1;
     const existingEntry = rows.find((row, idx) => {
@@ -275,6 +314,19 @@ async function updateEventMapping(outlookUpn, outlookEventId, stNonJobIds, lastH
     } else {
         await appendSheetRow('EventMap!A:F', rowData);
     }
+
+    // Keep cache warm to avoid read-quota bursts during backfills.
+    if (eventMapCache.rows) {
+        if (existingRowIndex) {
+            const idx = existingRowIndex - 2;
+            if (idx >= 0 && idx < eventMapCache.rows.length) {
+                eventMapCache.rows[idx] = rowData;
+            }
+        } else {
+            eventMapCache.rows.push(rowData);
+        }
+        eventMapCache.loadedAtMs = Date.now();
+    }
     console.log(`Event mapping updated for ${outlookUpn}:${outlookEventId}.`);
 }
 
@@ -286,7 +338,7 @@ async function updateEventMapping(outlookUpn, outlookEventId, stNonJobIds, lastH
  * @returns {Promise<void>}
  */
 async function deleteEventMapping(outlookUpn, outlookEventId) {
-    const existingMapping = await findEventMapping(outlookUpn, outlookEventId);
+    const existingMapping = arguments.length >= 3 ? arguments[2] : await findEventMapping(outlookUpn, outlookEventId);
     if (existingMapping && existingMapping.rowIndex) {
         // Option 1: Mark as DELETED (recommended for auditing)
         await updateEventMapping(

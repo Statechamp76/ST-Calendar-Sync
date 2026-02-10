@@ -106,11 +106,14 @@ async function stApiRequest(endpoint, options = {}) {
                     await wait(getBackoffMs(attempt));
                     continue;
                 }
+                throw lastError;
             }
 
             if (!response.ok) {
                 const errorBody = await response.text();
-                throw new Error(`ServiceTitan API Error: ${response.status} ${response.statusText} - ${errorBody}`);
+                const error = new Error(`ServiceTitan API Error: ${response.status} ${response.statusText} - ${errorBody}`);
+                error.statusCode = response.status;
+                throw error;
             }
 
             if (response.status === 204) {
@@ -120,10 +123,12 @@ async function stApiRequest(endpoint, options = {}) {
             return response.json();
         } catch (error) {
             lastError = error;
-            if (attempt < maxAttempts) {
+            const isNetworkError = !Object.prototype.hasOwnProperty.call(error, 'statusCode');
+            if (isNetworkError && attempt < maxAttempts) {
                 await wait(getBackoffMs(attempt));
                 continue;
             }
+            throw error;
         }
     }
 
@@ -146,11 +151,17 @@ function wait(ms) {
  * @returns {Promise<string>} The ID of the newly created appointment.
  */
 async function createNonJob(appointmentData) {
-    console.log('Creating Non-Job Appointment:', appointmentData);
+    // Avoid logging appointment names (could contain customer/private data). Keep logs minimal.
+    console.log('Creating Non-Job Appointment', {
+        technicianId: appointmentData.technicianId,
+        start: appointmentData.start,
+        duration: appointmentData.duration,
+        allDay: Boolean(appointmentData.allDay),
+        showOnTechnicianSchedule: Boolean(appointmentData.showOnTechnicianSchedule),
+    });
     // appointmentData should contain: technicianId, timesheetCodeId, start (ISO), duration (HH:mm:ss), name
     const payload = {
         technicianId: parseInt(appointmentData.technicianId),
-        timesheetCodeId: parseInt(appointmentData.timesheetCodeId),
         start: appointmentData.start, // ISO 8601 string
         duration: appointmentData.duration, // HH:mm:ss
         name: appointmentData.name,
@@ -161,6 +172,11 @@ async function createNonJob(appointmentData) {
         removeTechnicianFromCapacityPlanning: Boolean(appointmentData.removeTechnicianFromCapacityPlanning),
         active: appointmentData.active !== false,
     };
+
+    const timesheetCodeId = Number.parseInt(String(appointmentData.timesheetCodeId || ''), 10);
+    if (Number.isFinite(timesheetCodeId) && timesheetCodeId > 0) {
+        payload.timesheetCodeId = timesheetCodeId;
+    }
 
     const response = await stApiRequest('/non-job-appointments', {
         method: 'POST',
@@ -177,10 +193,15 @@ async function createNonJob(appointmentData) {
  * @returns {Promise<void>}
  */
 async function updateNonJob(appointmentId, updateData) {
-    console.log(`Updating Non-Job Appointment ${appointmentId}:`, updateData);
+    console.log(`Updating Non-Job Appointment ${appointmentId}`, {
+        technicianId: updateData.technicianId,
+        start: updateData.start,
+        duration: updateData.duration,
+        allDay: Boolean(updateData.allDay),
+        showOnTechnicianSchedule: Boolean(updateData.showOnTechnicianSchedule),
+    });
     const payload = {
         technicianId: parseInt(updateData.technicianId),
-        timesheetCodeId: parseInt(updateData.timesheetCodeId),
         start: updateData.start,
         duration: updateData.duration,
         name: updateData.name,
@@ -191,6 +212,11 @@ async function updateNonJob(appointmentId, updateData) {
         removeTechnicianFromCapacityPlanning: Boolean(updateData.removeTechnicianFromCapacityPlanning),
         active: updateData.active !== false,
     };
+
+    const timesheetCodeId = Number.parseInt(String(updateData.timesheetCodeId || ''), 10);
+    if (Number.isFinite(timesheetCodeId) && timesheetCodeId > 0) {
+        payload.timesheetCodeId = timesheetCodeId;
+    }
 
     await stApiRequest(`/non-job-appointments/${appointmentId}`, {
         method: 'PUT',
@@ -206,10 +232,18 @@ async function updateNonJob(appointmentId, updateData) {
  */
 async function deleteNonJob(appointmentId) {
     console.log(`Deleting Non-Job Appointment ${appointmentId}`);
-    await stApiRequest(`/non-job-appointments/${appointmentId}`, {
-        method: 'DELETE',
-    });
-    console.log(`Non-Job Appointment ${appointmentId} deleted.`);
+    try {
+        await stApiRequest(`/non-job-appointments/${appointmentId}`, {
+            method: 'DELETE',
+        });
+        console.log(`Non-Job Appointment ${appointmentId} deleted.`);
+    } catch (error) {
+        if (error && error.statusCode === 404) {
+            console.warn(`Non-Job Appointment ${appointmentId} already missing (404).`);
+            return;
+        }
+        throw error;
+    }
 }
 
 module.exports = {

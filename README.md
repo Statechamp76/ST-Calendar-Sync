@@ -35,6 +35,7 @@ For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operati
 - `RUN_SYNC_AUDIENCE`
 - `SYNC_WINDOW_PAST_DAYS` (optional, default `30`)
 - `SYNC_WINDOW_FUTURE_DAYS` (optional, default `90`)
+- `PUBSUB_TOPIC` (optional, default `outlook-change-notifications`)
 - `OUTLOOK_USER_UPNS` (optional comma-separated fallback list)
 - `GRAPH_CLIENT_ID`
 - `GRAPH_CLIENT_SECRET`
@@ -51,8 +52,6 @@ For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operati
 - `ALERT_EMAIL_TO` (optional, requires `SENDGRID_API_KEY`)
 - `ALERT_EMAIL_FROM` (optional, requires `SENDGRID_API_KEY`)
 - `ALERT_COOLDOWN_SECONDS` (optional, default `600`)
-- `ST_REQUIRE_TIMESHEET` (optional, default `false`)
-- `ST_SHOW_ON_TECH_SCHEDULE` (optional, default `true`)
 - `ST_CLEAR_DISPATCH_BOARD` (optional, default `true`)
 - `ST_CLEAR_TECHNICIAN_VIEW` (optional, default `false`)
 - `ST_REMOVE_FROM_CAPACITY` (optional, default `true`)
@@ -70,14 +69,18 @@ Health check:
 curl http://localhost:8080/health
 ```
 
-## Deploy To Cloud Run (Private)
+## Deploy To Cloud Run
+
+Microsoft Graph webhooks require a publicly-reachable URL. This service is deployed with
+`--allow-unauthenticated` so Microsoft can call `POST /graph/notifications`, while all internal
+worker/admin endpoints remain protected by OIDC (`requireOidcAuth` middleware).
 
 ```powershell
 gcloud run deploy st-calendar-sync `
   --source . `
   --region us-central1 `
   --service-account st-calendar-sync-sa@<PROJECT_ID>.iam.gserviceaccount.com `
-  --no-allow-unauthenticated
+  --allow-unauthenticated
 ```
 
 Set non-secret env vars:
@@ -150,3 +153,6 @@ Sync behavior rules:
 - Delta tombstones (`@removed`) delete previously mapped ServiceTitan non-job appointments.
 - Events marked `free`/`available` are not created in ServiceTitan; existing mapped records are removed.
 - Events marked `private` are synced to ServiceTitan with the name `Busy`.
+- All synced ServiceTitan non-job appointments are created with:
+  - "Needs a Timesheet?" unchecked (`timesheetCodeId` is omitted)
+  - "Visible to technician schedule in the mobile app" checked (`showOnTechnicianSchedule: true`)

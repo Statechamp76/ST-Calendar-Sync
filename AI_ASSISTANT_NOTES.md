@@ -19,8 +19,8 @@ Last updated: 2026-02-09
 ## ServiceTitan Payload Behavior
 
 - Default mapping now targets mobile-visible blocking behavior:
-  - `timesheetCodeId: 0` unless `ST_REQUIRE_TIMESHEET=true`
-  - `showOnTechnicianSchedule: true`
+  - `timesheetCodeId` omitted (always; "Needs a Timesheet?" unchecked)
+  - `showOnTechnicianSchedule: true` (always; visible in mobile tech schedule)
   - `clearDispatchBoard: true`
   - `clearTechnicianView: false`
   - `removeTechnicianFromCapacityPlanning: true`
@@ -28,8 +28,6 @@ Last updated: 2026-02-09
 
 Environment toggles:
 
-- `ST_REQUIRE_TIMESHEET` (default `false`)
-- `ST_SHOW_ON_TECH_SCHEDULE` (default `true`)
 - `ST_CLEAR_DISPATCH_BOARD` (default `true`)
 - `ST_CLEAR_TECHNICIAN_VIEW` (default `false`)
 - `ST_REMOVE_FROM_CAPACITY` (default `true`)
@@ -92,4 +90,3 @@ Check scheduler config:
 ```powershell
 gcloud scheduler jobs describe st-calendar-sync-job --location us-central1
 ```
-

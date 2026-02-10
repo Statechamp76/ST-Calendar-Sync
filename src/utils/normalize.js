@@ -11,7 +11,7 @@ function normalizeGraphEvent(event) {
     end,
     isAllDay: Boolean(event.isAllDay),
     showAs: (event.showAs || 'busy').toLowerCase(),
-    isPrivate: event.sensitivity === 'private',
+    isPrivate: String(event.sensitivity || '').toLowerCase() === 'private',
     location: event.location?.displayName || '',
     attendees: (event.attendees || []).map((attendee) => ({
       email: attendee?.emailAddress?.address || '',
@@ -50,7 +50,17 @@ function normalizeDateTimeValue(value) {
 }
 
 function getEventDedupeKey(event) {
-  return `${event.id}:${event.lastModifiedDateTime || ''}`;
+  // Include key fields so logic changes (e.g., private masking) can force an update even when
+  // lastModifiedDateTime is unchanged.
+  return [
+    event.id,
+    event.lastModifiedDateTime || '',
+    event.isPrivate ? 'P' : 'N',
+    event.showAs || '',
+    event.isAllDay ? 'A' : 'T',
+    event.start || '',
+    event.end || '',
+  ].join(':');
 }
 
 module.exports = {
