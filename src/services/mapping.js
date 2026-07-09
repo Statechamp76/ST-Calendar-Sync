@@ -5,7 +5,7 @@ function getMaskedSubject(event) {
   const showAs = String(event.showAs || 'busy').toLowerCase();
   // Policy: never copy Outlook subjects for PRIVATE events.
   if (event.isPrivate) {
-    return 'Busy';
+    return 'Private';
   }
 
   // For non-private events, keep the Outlook subject (this is what the user wants to see in ST).

@@ -33,36 +33,72 @@ async function getGraphAccessToken() {
 }
 
 async function graphRequest(method, url, body, extraHeaders = null) {
-  const token = await getGraphAccessToken();
-  const response = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(extraHeaders || {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const maxAttempts = 5;
+  let lastError = null;
 
-  const text = await response.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { raw: text };
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const token = await getGraphAccessToken();
+      const response = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          ...(extraHeaders || {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+
+      const text = await response.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        data = { raw: text };
+      }
+
+      if (!response.ok) {
+        const retryable = response.status === 429 || (response.status >= 500 && response.status <= 599);
+        if (retryable && attempt < maxAttempts) {
+          await wait(getBackoffMs(attempt));
+          continue;
+        }
+        throw new Error(`Graph ${method} failed ${response.status}: ${JSON.stringify(data)}`);
+      }
+
+      return data;
+    } catch (error) {
+      lastError = error;
+      const msg = String(error?.message || '').toLowerCase();
+      const retryable = msg.includes('fetch') || msg.includes('network') || msg.includes('timeout');
+      if (retryable && attempt < maxAttempts) {
+        await wait(getBackoffMs(attempt));
+        continue;
+      }
+      throw error;
+    }
   }
 
-  if (!response.ok) {
-    throw new Error(`Graph ${method} failed ${response.status}: ${JSON.stringify(data)}`);
-  }
+  throw lastError;
+}
 
-  return data;
+function getBackoffMs(attempt) {
+  const jitter = Math.floor(Math.random() * 150);
+  return Math.min(8_000, 300 * (2 ** (attempt - 1)) + jitter);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function getCalendarWindowEvents(userUpn, pastDays, futureDays) {
   const now = DateTime.utc();
   const startDateTime = now.minus({ days: pastDays }).toISO();
   const endDateTime = now.plus({ days: futureDays }).toISO();
+  return getCalendarEventsBetween(userUpn, startDateTime, endDateTime);
+}
+
+async function getCalendarEventsBetween(userUpn, startDateTime, endDateTime) {
   const selectFields = [
     'id',
     'iCalUId',
@@ -79,8 +115,8 @@ async function getCalendarWindowEvents(userUpn, pastDays, futureDays) {
   ];
 
   const params = new URLSearchParams({
-    startDateTime,
-    endDateTime,
+    startDateTime: String(startDateTime),
+    endDateTime: String(endDateTime),
     $select: selectFields.join(','),
     $top: '100',
   });
@@ -192,6 +228,7 @@ async function createOrRenewSubscription(userUpn, notificationUrl, clientState) 
 
 module.exports = {
   getCalendarWindowEvents,
+  getCalendarEventsBetween,
   getDeltaEvents,
   createSubscription,
   createOrRenewSubscription,

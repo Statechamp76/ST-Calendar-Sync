@@ -14,9 +14,6 @@ function parseJsonArray(value) {
 }
 
 function isOurSyncLikeAppointment(appt) {
-  const name = String(appt?.name || '').trim();
-  if (!(name === 'Busy' || name === 'Out of Office')) return false;
-
   // These are the defaults our sync uses. If fields are absent, don't treat as ours.
   if (appt?.showOnTechnicianSchedule !== true) return false;
   if (appt?.clearDispatchBoard !== true) return false;
@@ -40,6 +37,43 @@ function makeSignature(appt) {
     appt?.removeTechnicianFromCapacityPlanning ? 'C1' : 'C0',
     appt?.active ? 'X1' : 'X0',
   ].join('|');
+}
+
+function makeSlotSignature(appt) {
+  // Same technical slot/config but name-agnostic to catch "Busy + detailed" duplicates.
+  return [
+    appt?.technicianId ?? '',
+    appt?.start ?? '',
+    appt?.duration ?? '',
+    appt?.allDay ? 'A' : 'T',
+    appt?.showOnTechnicianSchedule ? 'S1' : 'S0',
+    appt?.clearDispatchBoard ? 'D1' : 'D0',
+    appt?.clearTechnicianView ? 'V1' : 'V0',
+    appt?.removeTechnicianFromCapacityPlanning ? 'C1' : 'C0',
+    appt?.active ? 'X1' : 'X0',
+  ].join('|');
+}
+
+function getNamePriority(appt) {
+  const name = String(appt?.name || '').trim();
+  if (name === 'Private') return 500; // privacy-safe title must win
+  if (name === 'Out of Office') return 300;
+  if (name === 'Busy') return 200;
+  if (name === 'Sales Huddle') return 150;
+  // Detailed/non-generic titles are preferred over "Busy".
+  if (name) return 400;
+  return 100;
+}
+
+function pickEntryToKeep(entries, referencedIds) {
+  const referenced = entries.filter((e) => referencedIds.has(e.id));
+  const candidates = referenced.length > 0 ? referenced : entries;
+  const sorted = [...candidates].sort((a, b) => {
+    const p = getNamePriority(b.appt) - getNamePriority(a.appt);
+    if (p !== 0) return p;
+    return a.id.localeCompare(b.id);
+  });
+  return sorted[0];
 }
 
 async function getReferencedNonJobIdsSet() {
@@ -117,7 +151,7 @@ async function dedupeNonJobsThisWeekForward(options = {}) {
       const groups = new Map();
       for (const appt of ours) {
         const id = String(appt.id);
-        const key = makeSignature(appt);
+        const key = makeSlotSignature(appt);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push({ id, appt });
       }
@@ -125,27 +159,9 @@ async function dedupeNonJobsThisWeekForward(options = {}) {
       for (const [, entries] of groups.entries()) {
         if (entries.length <= 1) continue;
 
-        // If at least one of these IDs is referenced in EventMap, delete only the unreferenced duplicates.
-        // Otherwise keep one and delete the rest.
-        const referencedEntries = entries.filter((e) => referenced.has(e.id));
-        const unref = entries.filter((e) => !referenced.has(e.id));
-
-        if (referencedEntries.length > 0) {
-          if (unref.length === 0) continue;
-          summary.duplicateGroupsFound += 1;
-          summary.appointmentsToDelete += unref.length;
-          if (!dryRun) {
-            for (const e of unref) {
-              await servicetitan.deleteNonJob(e.id);
-              summary.deleted += 1;
-            }
-          }
-          continue;
-        }
-
-        // No referenced IDs: keep one (lowest id) and delete the rest.
-        const sorted = [...entries].sort((a, b) => a.id.localeCompare(b.id));
-        const toDelete = sorted.slice(1);
+        // Keep one best candidate for this slot and delete the rest.
+        const keep = pickEntryToKeep(entries, referenced);
+        const toDelete = entries.filter((e) => e.id !== keep.id);
         if (toDelete.length === 0) continue;
         summary.duplicateGroupsFound += 1;
         summary.appointmentsToDelete += toDelete.length;
@@ -181,26 +197,80 @@ async function purgeNonJobsInWindow(options = {}) {
   const startIso = startsOnOrAfter || defaults.startsOnOrAfter;
   const endIso = startsOnOrBefore || defaults.startsOnOrBefore;
 
+  async function purgeForTechnicianId(technicianIdOrNull) {
+    // ServiceTitan frequently caps page sizes; use a conservative size and page until empty/no-new.
+    const pageSize = 200;
+    let page = 1;
+    let totalForTarget = 0;
+    const seenIds = new Set();
+
+    while (true) {
+      const appts = await servicetitan.listNonJobs({
+        technicianId: technicianIdOrNull,
+        startsOnOrAfter: startIso,
+        startsOnOrBefore: endIso,
+        page,
+        pageSize,
+      });
+
+      if (!appts || appts.length === 0) break;
+
+      let newInPage = 0;
+      for (const appt of appts) {
+        const id = appt && appt.id !== undefined ? String(appt.id) : null;
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        newInPage += 1;
+        totalForTarget += 1;
+
+        summary.appointmentsFound += 1;
+        summary.appointmentsToDelete += 1;
+
+        if (!dryRun) {
+          await servicetitan.deleteNonJob(id);
+          summary.deleted += 1;
+        }
+      }
+
+      if (newInPage === 0) break; // protect against repeating pages / capped paging quirks
+      page += 1;
+      if (page > 500) break; // safety cap; global listing could be larger
+    }
+
+    return totalForTarget;
+  }
+
   let techIds = [];
 
   if (allTechnicians) {
-    // Prefer ServiceTitan as the source of truth for the purge target list.
-    // This is the only reliable way to delete *all* non-job appointments across the tenant.
-    const all = [];
-    let page = 1;
-    const pageSize = 500;
-    while (true) {
-      const batch = await servicetitan.listTechnicians({ page, pageSize });
-      all.push(...batch);
-      if (!batch || batch.length < pageSize) break;
-      page += 1;
-      if (page > 200) break; // safety cap
+    // Best-effort "delete for the whole tenant": list non-jobs without a technicianId filter.
+    // Some ServiceTitan tenants don't expose a technicians listing endpoint under dispatch/v2.
+    // If the global listing is not supported, we'll fall back to the sheet-driven tech list.
+    try {
+      const probe = await servicetitan.listNonJobs({
+        technicianId: null,
+        startsOnOrAfter: startIso,
+        startsOnOrBefore: endIso,
+        page: 1,
+        pageSize: 1,
+      });
+
+      if (Array.isArray(probe)) {
+        techIds = ['*ALL*'];
+      }
+    } catch (e) {
+      console.warn('cleanup.purge.global_list_not_supported', { message: e.message });
+      techIds = [];
     }
-    techIds = all
-      .map((t) => t && (t.id ?? t.technicianId))
-      .filter((id) => id !== undefined && id !== null && String(id).trim() !== '')
-      .map((id) => String(id));
   } else {
+    const techMap = await sheets.getTechMap();
+    techIds = techMap
+      .filter((u) => u.st_technician_id && (includeDisabled ? true : Boolean(u.enabled)))
+      .map((u) => String(u.st_technician_id));
+  }
+
+  if (techIds.length === 0) {
+    // Fallback: if allTechnicians is true but global listing isn't supported, use the sheet.
     const techMap = await sheets.getTechMap();
     techIds = techMap
       .filter((u) => u.st_technician_id && (includeDisabled ? true : Boolean(u.enabled)))
@@ -224,43 +294,9 @@ async function purgeNonJobsInWindow(options = {}) {
     summary.techniciansProcessed += 1;
 
     try {
-      const pageSize = 500;
-      let page = 1;
-      let totalForTech = 0;
-      const seenIds = new Set();
-
-      while (true) {
-        const appts = await servicetitan.listNonJobs({
-          technicianId: techId,
-          startsOnOrAfter: startIso,
-          startsOnOrBefore: endIso,
-          page,
-          pageSize,
-        });
-
-        if (!appts || appts.length === 0) break;
-
-        for (const appt of appts) {
-          const id = appt && appt.id !== undefined ? String(appt.id) : null;
-          if (!id || seenIds.has(id)) continue;
-          seenIds.add(id);
-          totalForTech += 1;
-
-          summary.appointmentsFound += 1;
-          summary.appointmentsToDelete += 1;
-
-          if (!dryRun) {
-            await servicetitan.deleteNonJob(id);
-            summary.deleted += 1;
-          }
-        }
-
-        if (appts.length < pageSize) break;
-        page += 1;
-        if (page > 200) break; // safety cap
-      }
-
-      console.log('cleanup.purge.tech.complete', { techId, totalForTech });
+      const isGlobal = techId === '*ALL*';
+      const totalForTech = await purgeForTechnicianId(isGlobal ? null : techId);
+      console.log('cleanup.purge.tech.complete', { techId: isGlobal ? 'ALL' : techId, totalForTech });
     } catch (error) {
       summary.errors.push({
         technicianId: techId,
@@ -318,11 +354,110 @@ async function clearSyncSheets() {
   return { cleared: true };
 }
 
+async function purgeNonJobsForTechnician(options = {}) {
+  const {
+    technicianId,
+    startsOnOrAfter = null,
+    startsOnOrBefore = null,
+    dryRun = true,
+  } = options;
+
+  const techId = String(technicianId || '').trim();
+  if (!techId) throw new Error('Missing required technicianId');
+
+  const defaults = getDefaultStartAndEnd();
+  const startIso = startsOnOrAfter || defaults.startsOnOrAfter;
+  const endIso = startsOnOrBefore || defaults.startsOnOrBefore;
+
+  const summary = {
+    dryRun,
+    technicianId: techId,
+    startsOnOrAfter: startIso,
+    startsOnOrBefore: endIso,
+    appointmentsFound: 0,
+    deleted: 0,
+    errors: [],
+  };
+
+  try {
+    // ServiceTitan frequently caps page sizes; use a conservative size and page until empty/no-new.
+    const pageSize = 200;
+    let page = 1;
+    const seenIds = new Set();
+
+    while (true) {
+      const appts = await servicetitan.listNonJobs({
+        technicianId: techId,
+        startsOnOrAfter: startIso,
+        startsOnOrBefore: endIso,
+        page,
+        pageSize,
+      });
+
+      if (!appts || appts.length === 0) break;
+
+      let newInPage = 0;
+      for (const appt of appts) {
+        const id = appt && appt.id !== undefined ? String(appt.id) : null;
+        if (!id || seenIds.has(id)) continue;
+        seenIds.add(id);
+        newInPage += 1;
+        summary.appointmentsFound += 1;
+
+        if (!dryRun) {
+          await servicetitan.deleteNonJob(id);
+          summary.deleted += 1;
+        }
+      }
+
+      if (newInPage === 0) break; // protect against repeating pages / capped paging quirks
+      page += 1;
+      if (page > 500) break; // safety cap
+    }
+  } catch (error) {
+    summary.errors.push({ message: error.message });
+  }
+
+  return summary;
+}
+
+async function deleteNonJobsByIds(options = {}) {
+  const {
+    ids = [],
+    dryRun = true,
+  } = options;
+
+  const uniqueIds = [...new Set((ids || []).map((x) => String(x || '').trim()).filter(Boolean))];
+
+  const summary = {
+    dryRun,
+    requested: Array.isArray(ids) ? ids.length : 0,
+    unique: uniqueIds.length,
+    deleted: 0,
+    errors: [],
+  };
+
+  for (const id of uniqueIds) {
+    try {
+      if (!dryRun) {
+        await servicetitan.deleteNonJob(id);
+        summary.deleted += 1;
+      }
+    } catch (error) {
+      summary.errors.push({ id, message: error.message });
+    }
+  }
+
+  return summary;
+}
+
 module.exports = {
   dedupeNonJobsThisWeekForward,
   purgeNonJobsInWindow,
+  purgeNonJobsForTechnician,
   resetSyncState,
   clearSyncSheets,
+  deleteNonJobsByIds,
   toIsoAtTzDayStart,
   toIsoAtTzDayEnd,
 };

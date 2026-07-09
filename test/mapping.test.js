@@ -60,5 +60,5 @@ test('mapEventToServiceTitanPayloads masks private event subject', () => {
   };
 
   const payloads = mapEventToServiceTitanPayloads(event, userConfig);
-  assert.equal(payloads[0].name, 'Busy');
+  assert.equal(payloads[0].name, 'Private');
 });

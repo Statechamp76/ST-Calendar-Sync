@@ -4,6 +4,16 @@ Collects Outlook (Microsoft 365) calendar events and upserts relevant entries as
 
 For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operational state and deferred tasks.
 
+## Internal Memory
+
+This repo maintains an "internal memory" file at `AI_ASSISTANT_NOTES.md`.
+
+When doing maintenance or incident response, read that file first for:
+- current runtime status
+- Sheets schema notes
+- idempotency/stable-key invariants
+- incident runbooks (maintenance mode, purge, reconcile)
+
 ## App Location And Entrypoint
 
 - App root: this repository root (no `outlook-sync-service/` subfolder)
@@ -16,7 +26,15 @@ For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operati
 - `GET /health` -> `200 ok`
 - `POST /run-sync` -> triggers one delta sync cycle (all enabled users) and returns JSON summary
 - `POST /backfill/last-30-days` -> one-time backfill for past 30 days (busy/OOF only)
-- `POST /backfill/next-90-days` -> one-time backfill for next 90 days (busy/OOF only)
+- `POST /backfill/next-90-days` -> temporary: backfill a configurable forward window (default 7 days starting 2026-02-14 UTC)
+- `POST /cleanup/reset` (OIDC) -> purge ST non-jobs in a window (supports all technicians) and optionally clear sheets
+- `POST /cleanup/delete-nonjobs` (OIDC) -> delete explicit ST non-job appointment IDs
+- `POST /cleanup/purge-nonjobs-for-tech` (OIDC) -> purge ST non-jobs for one technician ID
+- `POST /reconcile/window` (OIDC) -> detect/delete duplicates created by this integration (stable-key based); supports `startUtc`/`endUtc` query or body
+- `POST /internal/ai/inbox/process` (OIDC) -> consume `AI_INBOX` rows, write status rows to `AI_OUTBOX`, then clear consumed inbox rows
+- `POST /ai/entries` (API key) -> append structured AI memory entry to Firestore
+- `GET /ai/entries` (API key) -> read recent AI memory entries from Firestore
+- `GET /ai/state` (API key) -> lightweight rollup for a project (counts/latest titles in recent window)
 
 `/run-sync` response shape:
 
@@ -57,6 +75,119 @@ For continuity between sessions, see `AI_ASSISTANT_NOTES.md` for current operati
 - `ST_CLEAR_DISPATCH_BOARD` (optional, default `true`)
 - `ST_CLEAR_TECHNICIAN_VIEW` (optional, default `false`)
 - `ST_REMOVE_FROM_CAPACITY` (optional, default `true`)
+- `ST_INTEGRATION_APPLICATION_GUID` (optional, default set in code; used for stable-key external data marker)
+- `CANONICAL_HUDDLE_MAILBOX` (optional, default `MBrennan@elevatedroofing.com`)
+- `SALES_HUDDLE_USER_UPNS` (optional, CSV of Outlook UPNs for huddle targeting)
+- `DISABLE_HUDDLE_SYNC` (optional, default `true`; when true, huddle blocks are not created/updated from Outlook)
+- `DISABLE_BACKFILL_LAST_30` (optional, default `true`; when true, `POST /backfill/last-30-days` returns 410)
+- `BACKFILL_NEXT_START_UTC` (optional, default `2026-02-14T00:00:00Z`)
+- `BACKFILL_NEXT_DAYS` (optional, default `7`)
+- `AI_BRIDGE_ENABLED` (optional, default `false`; when true, enables `/ai/*` endpoints)
+- `AI_BRIDGE_API_KEY` (required when `AI_BRIDGE_ENABLED=true`; must match `X-API-Key` request header)
+- `FIRESTORE_PROJECT_ID` (optional; defaults to ADC project)
+- `FIRESTORE_ENABLED` (optional, default `false`; when true, state/locks/eventMap/deltaState use Firestore)
+- `SYNC_MODE` (optional, default `EXCLUDE_FREE_ONLY`)
+- `HOLIDAY_EXCLUDE_KEYWORDS` (optional CSV, default `holiday,vacation`; all-day events with these keywords are excluded)
+- `LOCK_TTL_SECONDS` (optional, default `600`)
+- `RECONCILE_DAYS_AHEAD` (optional, default `90`)
+- `Locks` sheet: this service will auto-create a `Locks` tab in the configured spreadsheet to coordinate per-user sync locks.
+
+## Firestore State Migration
+
+Feature-flagged cutover:
+- `FIRESTORE_ENABLED=true`:
+  - Locks -> Firestore `locks`
+  - Event mapping -> Firestore `eventMap`
+  - Delta token state -> Firestore `deltaState`
+- `FIRESTORE_ENABLED=false`:
+  - fallback to legacy Sheets state path (TechMap remains in Sheets either way)
+
+Why:
+- reduce Sheets 429 lock/state failures
+- stronger lock semantics via Firestore transactions
+- improved idempotency and rollback traceability
+
+Rollback:
+1. Set `FIRESTORE_ENABLED=false`
+2. Redeploy
+3. Run `POST /reconcile/window` in dry-run mode to validate duplicates are controlled
+
+Sync policy:
+- Outlook is source of truth (no Outlook writes)
+- `SYNC_MODE=EXCLUDE_FREE_ONLY`: sync everything except `showAs=free/available`
+- Private events always written to ST with title exactly `Private`
+- All-day events are included except:
+  - subject contains `birthday`
+  - subject matches `HOLIDAY_EXCLUDE_KEYWORDS`
+
+## AI Bridge (Firestore)
+
+Purpose:
+- Persist prompts, decisions, runbooks, notes, incidents, and TODO items outside chat.
+- Store/retrieve entries under Firestore collection `ai_projects/{project}/entries`.
+
+Security:
+- `/ai/*` endpoints are disabled unless `AI_BRIDGE_ENABLED=true`.
+- `/ai/*` endpoints require `X-API-Key` matching `AI_BRIDGE_API_KEY`.
+- Entry content is never logged; logs only include metadata (`entryId`, `project`, `type`, `title`).
+- Guardrails reject payloads containing blocked keys (`attendees`, `body`, `location`) to avoid raw calendar payload dumps.
+
+POST example:
+
+```powershell
+curl -X POST "https://<cloud-run-url>/ai/entries" `
+  -H "Content-Type: application/json" `
+  -H "X-API-Key: <AI_BRIDGE_API_KEY>" `
+  --data-binary "@samples/ai_entry.json"
+```
+
+GET example:
+
+```powershell
+curl "https://<cloud-run-url>/ai/entries?project=ST-Calendar-Sync&limit=20" `
+  -H "X-API-Key: <AI_BRIDGE_API_KEY>"
+```
+
+## AI Inbox/Outbox (Sheets)
+
+Purpose:
+- Consume AI work items from `AI_INBOX` and write processing status/results to `AI_OUTBOX`.
+- Immediately clear consumed inbox rows (blank all row cells including `id`) to avoid repeated retries/throttling.
+
+Sheet config used by code:
+- Spreadsheet ID: `1DHL_hHvduwxUxm0uAtmCIgolwv6cqDSHUe0hJwW6na8`
+- `AI_INBOX` gid `1179786912` (headers: `id, created_utc, project, type, title, tags, content, source`)
+- `AI_OUTBOX` gid `1028748998` (headers: `id, created_utc, project, type, title, content, related_inbox_id`)
+
+Behavior of `POST /internal/ai/inbox/process`:
+- one read from `AI_INBOX`
+- one batched append to `AI_OUTBOX`
+- one batched clear operation on consumed inbox rows
+- strict order: append outbox first, then clear inbox rows
+- malformed inbox rows produce outbox `status=error` entries and are still cleared to prevent retry storms
+- uses existing Sheets retry/backoff logic for 429/5xx
+- concurrency guard uses Firestore lock doc `system_locks/aiInboxLock` with TTL
+
+Run locally:
+
+1. Start service:
+```powershell
+npm start
+```
+
+2. Get local identity token (audience must match your `RUN_SYNC_AUDIENCE`):
+```powershell
+$aud = "http://localhost:8080"
+$token = gcloud auth print-identity-token --audiences=$aud
+```
+
+3. Trigger inbox processing:
+```powershell
+curl -X POST "http://localhost:8080/internal/ai/inbox/process" `
+  -H "Authorization: Bearer $token" `
+  -H "Content-Type: application/json" `
+  -d "{\"project\":\"ST-Calendar-Sync\",\"limit\":50}"
+```
 
 ## Local Run
 

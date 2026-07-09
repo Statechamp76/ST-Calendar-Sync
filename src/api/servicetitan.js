@@ -1,10 +1,15 @@
 const { getSecrets } = require('../utils/secrets');
 const { DateTime } = require('luxon');
+const { extractIntegrationExternalId } = require('../utils/externalData');
 
 let accessTokenCache = {
     token: null,
     expiry: null,
 };
+
+function isStrictExternalDataEnforced() {
+    return String(process.env.ST_STRICT_EXTERNALDATA || 'false').trim().toLowerCase() === 'true';
+}
 
 /**
  * Retrieves a valid ServiceTitan access token, refreshing it if necessary.
@@ -160,7 +165,7 @@ async function createNonJob(appointmentData) {
         showOnTechnicianSchedule: Boolean(appointmentData.showOnTechnicianSchedule),
     });
     // appointmentData should contain: technicianId, timesheetCodeId, start (ISO), duration (HH:mm:ss), name
-    const payload = {
+    const basePayload = {
         technicianId: parseInt(appointmentData.technicianId),
         start: appointmentData.start, // ISO 8601 string
         duration: appointmentData.duration, // HH:mm:ss
@@ -175,15 +180,61 @@ async function createNonJob(appointmentData) {
 
     const timesheetCodeId = Number.parseInt(String(appointmentData.timesheetCodeId || ''), 10);
     if (Number.isFinite(timesheetCodeId) && timesheetCodeId > 0) {
-        payload.timesheetCodeId = timesheetCodeId;
+        basePayload.timesheetCodeId = timesheetCodeId;
     }
 
-    const response = await stApiRequest('/non-job-appointments', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
-    console.log('Non-Job Appointment created:', response.id);
-    return response.id;
+    const integrationGuid = String(appointmentData.integrationApplicationGuid || '').trim();
+    const integrationExternalId = String(appointmentData.integrationExternalId || '').trim();
+
+    const candidates = buildIntegrationPayloadCandidates(basePayload, integrationGuid, integrationExternalId);
+    let lastError = null;
+    for (const payload of candidates) {
+        try {
+            const response = await stApiRequest('/non-job-appointments', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            console.log('Non-Job Appointment created:', response.id);
+
+            // Verify ServiceTitan actually persisted our integration stable key.
+            if (integrationGuid && integrationExternalId) {
+                try {
+                    const detail = await getNonJob(response.id);
+                    const found = extractIntegrationExternalId(detail, integrationGuid);
+                    if (found !== integrationExternalId) {
+                        if (isStrictExternalDataEnforced()) {
+                            // Strict mode: rollback immediately.
+                            await deleteNonJob(response.id);
+                            throw new Error('ServiceTitan did not persist integration externalData stable key');
+                        }
+                        // Fail-open mode: keep created record to avoid data loss when tenant doesn't persist externalData.
+                        console.warn('servicetitan.externalData.not_persisted.create', {
+                            appointmentId: String(response.id),
+                        });
+                    }
+                } catch (verifyError) {
+                    if (isStrictExternalDataEnforced()) {
+                        // Strict mode: ensure created record doesn't remain.
+                        try {
+                            await deleteNonJob(response.id);
+                        } catch {
+                            // ignore - deleteNonJob already handles 404
+                        }
+                        throw verifyError;
+                    }
+                    console.warn('servicetitan.externalData.verify_failed.create', {
+                        appointmentId: String(response.id),
+                        message: verifyError.message,
+                    });
+                }
+            }
+            return response.id;
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    throw lastError || new Error('Failed to create non-job appointment');
 }
 
 /**
@@ -200,7 +251,7 @@ async function updateNonJob(appointmentId, updateData) {
         allDay: Boolean(updateData.allDay),
         showOnTechnicianSchedule: Boolean(updateData.showOnTechnicianSchedule),
     });
-    const payload = {
+    const basePayload = {
         technicianId: parseInt(updateData.technicianId),
         start: updateData.start,
         duration: updateData.duration,
@@ -215,14 +266,41 @@ async function updateNonJob(appointmentId, updateData) {
 
     const timesheetCodeId = Number.parseInt(String(updateData.timesheetCodeId || ''), 10);
     if (Number.isFinite(timesheetCodeId) && timesheetCodeId > 0) {
-        payload.timesheetCodeId = timesheetCodeId;
+        basePayload.timesheetCodeId = timesheetCodeId;
     }
 
-    await stApiRequest(`/non-job-appointments/${appointmentId}`, {
-        method: 'PUT',
-        body: JSON.stringify(payload),
-    });
-    console.log(`Non-Job Appointment ${appointmentId} updated.`);
+    const integrationGuid = String(updateData.integrationApplicationGuid || '').trim();
+    const integrationExternalId = String(updateData.integrationExternalId || '').trim();
+
+    const candidates = buildIntegrationPayloadCandidates(basePayload, integrationGuid, integrationExternalId);
+    let lastError = null;
+    for (const payload of candidates) {
+        try {
+            await stApiRequest(`/non-job-appointments/${appointmentId}`, {
+                method: 'PUT',
+                body: JSON.stringify(payload),
+            });
+            console.log(`Non-Job Appointment ${appointmentId} updated.`);
+
+            if (integrationGuid && integrationExternalId) {
+                const detail = await getNonJob(appointmentId);
+                const found = extractIntegrationExternalId(detail, integrationGuid);
+                if (found !== integrationExternalId) {
+                    if (isStrictExternalDataEnforced()) {
+                        throw new Error('ServiceTitan did not persist integration externalData stable key on update');
+                    }
+                    console.warn('servicetitan.externalData.not_persisted.update', {
+                        appointmentId: String(appointmentId),
+                    });
+                }
+            }
+            return;
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    throw lastError || new Error(`Failed to update non-job appointment ${appointmentId}`);
 }
 
 /**
@@ -263,6 +341,12 @@ function buildQuery(params) {
     }
     const s = usp.toString();
     return s ? `?${s}` : '';
+}
+
+async function getNonJob(appointmentId) {
+    const id = String(appointmentId || '').trim();
+    if (!id) throw new Error('Missing appointmentId');
+    return stApiRequest(`/non-job-appointments/${encodeURIComponent(id)}`, { method: 'GET' });
 }
 
 async function listNonJobs(options = {}) {
@@ -320,10 +404,25 @@ async function listTechnicians(options = {}) {
     throw lastError || new Error('Failed to list technicians');
 }
 
+function buildIntegrationPayloadCandidates(basePayload, applicationGuid, externalId) {
+    const guid = String(applicationGuid || '').trim();
+    const ext = String(externalId || '').trim();
+    if (!guid || !ext) return [basePayload];
+
+    // ServiceTitan external data support varies; try common shapes.
+    return [
+        { ...basePayload, externalData: { applicationGuid: guid, externalId: ext } },
+        { ...basePayload, externalData: [{ applicationGuid: guid, externalId: ext }] },
+        { ...basePayload, externalData: { applicationGuid: guid, externalKey: ext } },
+        { ...basePayload, externalData: [{ applicationGuid: guid, externalKey: ext }] },
+    ];
+}
+
 module.exports = {
     createNonJob,
     updateNonJob,
     deleteNonJob,
+    getNonJob,
     listNonJobs,
     listTechnicians,
 };
