@@ -152,6 +152,17 @@ async function reconcileWindow(options = {}) {
     try {
       const techMap = await sheets.getTechMap();
       for (const u of techMap.filter((x) => x.enabled && x.outlook_upn)) {
+        // Re-anchor the delta window. A Graph calendarView/delta token bakes its
+        // [now-pastDays, now+futureDays] window in at initialization and NEVER
+        // slides; the token rotates each cycle but the window stays fixed. Once
+        // wall-clock time passes the original endDateTime, all current/future
+        // events fall outside it and are never returned, so calendars silently
+        // stop syncing (root cause of the 2026-07 outage). Clearing the token
+        // here forces the next delta cycle to re-initialize a fresh window, so
+        // it can never be more than ~24h stale. Idempotent: the next full pull
+        // upserts into the same EventMap keys (iCalUId:start:end) rather than
+        // duplicating, and this reconcile pass dedups any residual copies.
+        await stateStore.setDeltaState(u.outlook_upn, null);
         await stateStore.setLastFullReconcileUtc(u.outlook_upn);
       }
     } catch (e) {
