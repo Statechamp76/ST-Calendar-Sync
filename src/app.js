@@ -6,9 +6,15 @@ const { notifyFailure } = require('./services/alerts');
 const { getSecrets } = require('./utils/secrets');
 const { loadConfig } = require('./config');
 const cleanupService = require('./services/cleanup');
+const reconcileService = require('./services/reconcile');
+const { normalizeUpn } = require('./utils/upn');
+const { createAiBridgeRouter } = require('./routes/aiBridge');
+const aiInboxService = require('./services/aiInbox');
+const { DateTime } = require('luxon');
 
 const app = express();
 app.use(express.json()); // Middleware to parse JSON bodies
+app.use('/ai', createAiBridgeRouter());
 
 const config = loadConfig();
 
@@ -55,10 +61,10 @@ app.post('/graph/notifications', async (req, res) => {
             // Example resource: 'users/someone@example.com/events/...'
             const resource = String(notification.resource || '');
             const upnMatch = resource.match(/users\/([^/]+)\/events/i);
-            const userUpn = upnMatch ? decodeURIComponent(upnMatch[1]) : null;
+            const userUpn = upnMatch ? normalizeUpn(decodeURIComponent(upnMatch[1])) : null;
 
             if (userUpn) {
-                const messageId = await pubsub.topic(topicName).publishMessage({ json: { upn: userUpn } });
+                const messageId = await pubsub.topic(topicName).publishMessage({ json: { upn: userUpn }, orderingKey: userUpn });
                 console.log(`Published message ${messageId} for UPN: ${userUpn}`);
             } else {
                 console.warn('Could not extract UPN from Graph notification resource:', resource);
@@ -112,6 +118,8 @@ app.post('/sync/user', requireOidcAuth, async (req, res) => {
                 userUpn = m[1].trim();
             }
         }
+
+        userUpn = normalizeUpn(userUpn);
 
         if (!userUpn) {
             console.error('Received Pub/Sub message with missing UPN:', message);
@@ -196,6 +204,10 @@ app.post('/run-sync', requireOidcAuth, async (req, res) => {
 // One-time backfill: pull last 30 days of calendarView for all enabled users and upsert only busy/OOF.
 // Does not modify Outlook; it only creates/updates/deletes ServiceTitan non-job appointments + sheet mappings.
 app.post('/backfill/last-30-days', requireOidcAuth, async (req, res) => {
+    if (config.disableBackfillLast30) {
+        res.status(410).json({ error: 'backfill_last_30_disabled' });
+        return;
+    }
     try {
         const summary = await syncService.runBackfillLast30DaysAllUsers();
         if (summary.errors && summary.errors.length > 0) {
@@ -308,6 +320,100 @@ app.post('/cleanup/clear-sheets', requireOidcAuth, async (req, res) => {
     } catch (error) {
         console.error('Clear sheets failed:', error);
         await notifyFailure('ST Calendar Sync: /cleanup/clear-sheets failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Targeted maintenance: delete specific ServiceTitan non-job appointment IDs.
+// Never touches Outlook.
+app.post('/cleanup/delete-nonjobs', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const dryRun = body.dryRun !== false;
+        const ids = Array.isArray(body.ids) ? body.ids : [];
+        const summary = await cleanupService.deleteNonJobsByIds({ ids, dryRun });
+        console.log('cleanup.delete_nonjobs.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Delete nonjobs failed:', error);
+        await notifyFailure('ST Calendar Sync: /cleanup/delete-nonjobs failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Targeted maintenance: purge ServiceTitan non-job appointments for one technician within a time window.
+// Never touches Outlook.
+app.post('/cleanup/purge-nonjobs-for-tech', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const dryRun = body.dryRun !== false;
+        const summary = await cleanupService.purgeNonJobsForTechnician({
+            technicianId: body.technicianId,
+            startsOnOrAfter: body.startsOnOrAfter || null,
+            startsOnOrBefore: body.startsOnOrBefore || null,
+            dryRun,
+        });
+        console.log('cleanup.purge_nonjobs_for_tech.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Purge nonjobs for tech failed:', error);
+        await notifyFailure('ST Calendar Sync: /cleanup/purge-nonjobs-for-tech failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Reconcile duplicates created by this integration (stable-key based).
+// Never touches Outlook.
+app.post('/reconcile/window', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const dryRun = body.dryRun !== false;
+        const startUtc = body.startsOnOrAfter || body.startUtc || req.query.startUtc || DateTime.utc().toISO();
+        const endUtc = body.startsOnOrBefore || body.endUtc || req.query.endUtc
+            || DateTime.utc().plus({ days: config.reconcileDaysAhead || 90 }).toISO();
+        const summary = await reconcileService.reconcileWindow({
+            startsOnOrAfter: startUtc,
+            startsOnOrBefore: endUtc,
+            dryRun,
+        });
+        console.log('reconcile.window.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Reconcile window failed:', error);
+        await notifyFailure('ST Calendar Sync: /reconcile/window failed', {
+            message: error.message,
+        });
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Internal worker endpoint: consume AI inbox rows, append outbox status rows, then clear consumed inbox rows.
+app.post('/internal/ai/inbox/process', requireOidcAuth, async (req, res) => {
+    try {
+        const body = req.body || {};
+        const project = typeof body.project === 'string' && body.project.trim()
+            ? body.project.trim()
+            : 'ST-Calendar-Sync';
+        const limit = Number.parseInt(String(body.limit || '50'), 10);
+        const summary = await aiInboxService.processInbox({
+            project,
+            limit: Number.isFinite(limit) && limit > 0 ? limit : 50,
+        });
+        if (summary && summary.skipped && summary.reason === 'locked') {
+            res.status(409).json(summary);
+            return;
+        }
+        console.log('internal.ai.inbox.process.complete', summary);
+        res.status(200).json(summary);
+    } catch (error) {
+        console.error('Internal AI inbox process failed:', error);
+        await notifyFailure('ST Calendar Sync: /internal/ai/inbox/process failed', {
             message: error.message,
         });
         res.status(500).json({ error: error.message });

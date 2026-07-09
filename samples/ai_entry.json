@@ -1,0 +1,8 @@
+{
+  "project": "ST-Calendar-Sync",
+  "type": "runbook",
+  "title": "Run delta sync and inspect errors",
+  "tags": ["ops", "sync"],
+  "content": "1. Trigger POST /run-sync\n2. Check Cloud Run logs for sync.delta.complete\n3. If errors > 0, run targeted cleanup endpoint.",
+  "source": "codex"
+}

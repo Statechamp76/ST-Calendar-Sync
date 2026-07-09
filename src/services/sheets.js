@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const { getSecrets } = require('../utils/secrets');
 const { DateTime } = require('luxon');
+const { normalizeUpn } = require('../utils/upn');
 
 let sheetsService;
 let spreadsheetId;
@@ -11,6 +12,10 @@ const CACHE_TTL_MS = 5 * 60_000;
 let eventMapCache = {
     loadedAtMs: 0,
     headerRow: null,
+    rows: null,
+};
+let techMapCache = {
+    loadedAtMs: 0,
     rows: null,
 };
 
@@ -31,6 +36,42 @@ async function initializeSheets() {
     console.log('Google Sheets API client initialized.');
 }
 
+async function getSheetMetadata() {
+    await initializeSheets();
+    return withRetry(async () => {
+        return sheetsService.spreadsheets.get({
+            spreadsheetId,
+            fields: 'sheets.properties',
+        });
+    }, 'get metadata');
+}
+
+async function ensureSheetExists(sheetName, headerRowValues) {
+    await initializeSheets();
+    const metadata = await getSheetMetadata();
+    const existing = (metadata.data.sheets || []).find((s) => s.properties && s.properties.title === sheetName);
+    if (existing) return;
+
+    await withRetry(async () => {
+        await sheetsService.spreadsheets.batchUpdate({
+            spreadsheetId,
+            resource: {
+                requests: [{
+                    addSheet: {
+                        properties: {
+                            title: sheetName,
+                        },
+                    },
+                }],
+            },
+        });
+    }, `add sheet ${sheetName}`);
+
+    if (Array.isArray(headerRowValues) && headerRowValues.length > 0) {
+        await updateSheetRange(`${sheetName}!A1`, [headerRowValues]);
+    }
+}
+
 function invalidateEventMapCache() {
     eventMapCache.loadedAtMs = 0;
     eventMapCache.headerRow = null;
@@ -44,11 +85,12 @@ function invalidateEventMapCache() {
  * @param {string} range - The A1 notation or R1C1 notation of the range to retrieve.
  * @returns {Promise<Array<Array<string>>>} A 2D array of values from the sheet.
  */
-async function readSheetRows(range) {
+async function readSheetRows(range, spreadsheetIdOverride = null) {
     await initializeSheets();
+    const targetSpreadsheetId = spreadsheetIdOverride || spreadsheetId;
     return withRetry(async () => {
         const response = await sheetsService.spreadsheets.values.get({
-            spreadsheetId,
+            spreadsheetId: targetSpreadsheetId,
             range,
         });
         return response.data.values || [];
@@ -75,6 +117,23 @@ async function appendSheetRow(range, rowData) {
     }, `append ${range}`);
 }
 
+async function appendSheetRows(range, rowsData, spreadsheetIdOverride = null) {
+    const rows = Array.isArray(rowsData) ? rowsData : [];
+    if (rows.length === 0) return;
+    await initializeSheets();
+    const targetSpreadsheetId = spreadsheetIdOverride || spreadsheetId;
+    return withRetry(async () => {
+        await sheetsService.spreadsheets.values.append({
+            spreadsheetId: targetSpreadsheetId,
+            range,
+            valueInputOption: 'RAW',
+            resource: {
+                values: rows,
+            },
+        });
+    }, `append ${range} (batch ${rows.length})`);
+}
+
 /**
  * Updates a specific cell or range in a sheet.
  * @param {string} range - The A1 notation of the cell or range to update.
@@ -93,6 +152,22 @@ async function updateSheetRange(range, values) {
             },
         });
     }, `update ${range}`);
+}
+
+async function batchUpdateSheetRanges(data, spreadsheetIdOverride = null) {
+    const updates = Array.isArray(data) ? data : [];
+    if (updates.length === 0) return;
+    await initializeSheets();
+    const targetSpreadsheetId = spreadsheetIdOverride || spreadsheetId;
+    return withRetry(async () => {
+        await sheetsService.spreadsheets.values.batchUpdate({
+            spreadsheetId: targetSpreadsheetId,
+            resource: {
+                valueInputOption: 'RAW',
+                data: updates,
+            },
+        });
+    }, `batchUpdate values (${updates.length} ranges)`);
 }
 
 async function clearSheetRange(range) {
@@ -116,10 +191,7 @@ async function deleteSheetRows(sheetName, startRowIndex, endRowIndex) {
     await initializeSheets();
     return withRetry(async () => {
         // Need to get the sheetId first
-        const metadata = await sheetsService.spreadsheets.get({
-            spreadsheetId,
-            fields: 'sheets.properties',
-        });
+        const metadata = await getSheetMetadata();
         const sheet = metadata.data.sheets.find(s => s.properties.title === sheetName);
         if (!sheet) {
             throw new Error(`Sheet "${sheetName}" not found.`);
@@ -202,11 +274,15 @@ async function withRetry(fn, label) {
  * @returns {Promise<Array<object>>} Array of technician mappings.
  */
 async function getTechMap() {
-    const rows = await readSheetRows('TechMap!A2:D'); // Assuming headers are in A1:D1
-    return rows.map(row => ({
-        outlook_upn: row[0] || '',
-        st_technician_id: row[1] || '',
-        st_timesheet_code_id: row[2] || '',
+    const nowMs = Date.now();
+    if (!techMapCache.rows || nowMs - techMapCache.loadedAtMs > CACHE_TTL_MS) {
+        techMapCache.rows = await readSheetRows('TechMap!A2:D');
+        techMapCache.loadedAtMs = nowMs;
+    }
+    return techMapCache.rows.map(row => ({
+        outlook_upn: normalizeUpn(row[0]),
+        st_technician_id: String(row[1] || '').trim(),
+        st_timesheet_code_id: String(row[2] || '').trim(),
         enabled: (row[3] || 'FALSE').toUpperCase() === 'TRUE',
     }));
 }
@@ -230,13 +306,14 @@ function getRequiredHeaderIndex(headerRowValues, headerName, sheetName) {
  * @returns {Promise<object>} Delta state object, or a default if not found.
  */
 async function getDeltaState(outlookUpn) {
+    const normalizedUpn = normalizeUpn(outlookUpn);
     const rows = await readSheetRows('DeltaState!A2:E'); // Assuming headers in A1:E1
     const headerRowValues = (await readSheetRows('DeltaState!A1:E1'))[0];
     const upnIndex = getRequiredHeaderIndex(headerRowValues, 'outlook_upn', 'DeltaState');
 
     let rowIndex = -1;
     const existingEntry = rows.find((row, idx) => {
-        if (row[upnIndex] === outlookUpn) {
+        if (normalizeUpn(row[upnIndex]) === normalizedUpn) {
             rowIndex = idx + 2; // +2 because header is 1 and array is 0-indexed
             return true;
         }
@@ -246,7 +323,7 @@ async function getDeltaState(outlookUpn) {
     if (existingEntry) {
         return {
             rowIndex: rowIndex,
-            outlook_upn: existingEntry[0],
+            outlook_upn: normalizeUpn(existingEntry[0]),
             delta_link: existingEntry[1],
             window_end: existingEntry[2],
             last_run_utc: existingEntry[3],
@@ -255,7 +332,7 @@ async function getDeltaState(outlookUpn) {
         // Return default for initial sync
         return {
             rowIndex: null, // Indicates new entry
-            outlook_upn: outlookUpn,
+            outlook_upn: normalizedUpn,
             delta_link: null,
             window_end: null, // Or DateTime.now().plus({days: 90}).toISO() depending on initial window
             last_run_utc: null,
@@ -271,9 +348,10 @@ async function getDeltaState(outlookUpn) {
  * @returns {Promise<void>}
  */
 async function updateDeltaState(outlookUpn, newDeltaLink, existingRowIndex) {
+    const normalizedUpn = normalizeUpn(outlookUpn);
     const now = DateTime.utc().toISO();
     const rowData = [
-        outlookUpn,
+        normalizedUpn,
         newDeltaLink,
         // Assuming window_end is managed by the Graph API or a separate logic
         '', // Placeholder for window_end
@@ -287,7 +365,7 @@ async function updateDeltaState(outlookUpn, newDeltaLink, existingRowIndex) {
         // Append new row
         await appendSheetRow('DeltaState!A:D', rowData);
     }
-    console.log(`Delta state updated for ${outlookUpn}.`);
+    console.log(`Delta state updated for ${normalizedUpn}.`);
 }
 
 
@@ -298,6 +376,7 @@ async function updateDeltaState(outlookUpn, newDeltaLink, existingRowIndex) {
  * @returns {Promise<object | null>} The event mapping object with its row index, or null if not found.
  */
 async function findEventMapping(outlookUpn, outlookEventId) {
+    const normalizedUpn = normalizeUpn(outlookUpn);
     const nowMs = Date.now();
     if (!eventMapCache.rows || nowMs - eventMapCache.loadedAtMs > CACHE_TTL_MS) {
         const [rows, header] = await Promise.all([
@@ -316,7 +395,7 @@ async function findEventMapping(outlookUpn, outlookEventId) {
 
     let rowIndex = -1;
     const existingEntry = rows.find((row, idx) => {
-        if (row[upnIndex] === outlookUpn && row[eventIdIndex] === outlookEventId) {
+        if (normalizeUpn(row[upnIndex]) === normalizedUpn && row[eventIdIndex] === outlookEventId) {
             rowIndex = idx + 2; // +2 for header row and 0-index adjustment
             return true;
         }
@@ -326,7 +405,7 @@ async function findEventMapping(outlookUpn, outlookEventId) {
     if (existingEntry) {
         return {
             rowIndex: rowIndex,
-            outlook_upn: existingEntry[0],
+            outlook_upn: normalizeUpn(existingEntry[0]),
             outlook_event_id: existingEntry[1],
             st_nonjob_ids_json: existingEntry[2],
             last_hash: existingEntry[3],
@@ -337,7 +416,112 @@ async function findEventMapping(outlookUpn, outlookEventId) {
     return null;
 }
 
+// --- Distributed Locks (Sheets-backed) ---
+//
+// Locks sheet schema:
+// A: lock_key (e.g. outlook_upn)
+// B: lease_until_utc (ISO)
+// C: holder
+// D: updated_utc (ISO)
+const LOCKS_SHEET = 'Locks';
+const LOCKS_HEADER = ['lock_key', 'lease_until_utc', 'holder', 'updated_utc'];
+
+async function ensureLocksSheet() {
+    await ensureSheetExists(LOCKS_SHEET, LOCKS_HEADER);
+}
+
+async function readLocksRows() {
+    await ensureLocksSheet();
+    const [rows, header] = await Promise.all([
+        readSheetRows(`${LOCKS_SHEET}!A2:D`),
+        readSheetRows(`${LOCKS_SHEET}!A1:D1`),
+    ]);
+    return { rows, header: (header[0] || []) };
+}
+
+async function findLockRow(lockKey) {
+    const { rows, header } = await readLocksRows();
+    const keyIndex = getRequiredHeaderIndex(header, 'lock_key', LOCKS_SHEET);
+
+    let rowIndex = null;
+    const row = rows.find((r, idx) => {
+        if (String(r[keyIndex] || '') === String(lockKey || '')) {
+            rowIndex = idx + 2;
+            return true;
+        }
+        return false;
+    });
+
+    return { rowIndex, row: row || null, header };
+}
+
+function parseIsoToMs(value) {
+    const s = String(value || '').trim();
+    if (!s) return 0;
+    const dt = DateTime.fromISO(s, { zone: 'utc' });
+    if (!dt.isValid) return 0;
+    return dt.toMillis();
+}
+
+async function tryAcquireLock(lockKey, holder, ttlSeconds) {
+    const key = String(lockKey || '').trim();
+    const h = String(holder || '').trim();
+    const ttl = Number.parseInt(String(ttlSeconds || ''), 10);
+    if (!key) throw new Error('Missing lockKey');
+    if (!h) throw new Error('Missing holder');
+    if (!Number.isFinite(ttl) || ttl <= 0) throw new Error('Invalid ttlSeconds');
+
+    const now = DateTime.utc();
+    const desiredLease = now.plus({ seconds: ttl }).toISO();
+    const updated = now.toISO();
+
+    const { rowIndex, row } = await findLockRow(key);
+    const currentLeaseMs = row ? parseIsoToMs(row[1]) : 0;
+    const nowMs = now.toMillis();
+
+    // Only attempt takeover if expired (or missing).
+    if (row && currentLeaseMs > nowMs) {
+        return { acquired: false, reason: 'locked' };
+    }
+
+    const rowData = [key, desiredLease, h, updated];
+    if (rowIndex) {
+        await updateSheetRange(`${LOCKS_SHEET}!A${rowIndex}:D${rowIndex}`, [rowData]);
+    } else {
+        await appendSheetRow(`${LOCKS_SHEET}!A:D`, rowData);
+    }
+
+    // Verify we actually hold the lock (mitigates races).
+    const verify = await findLockRow(key);
+    const verifyHolder = verify.row ? String(verify.row[2] || '') : '';
+    if (verifyHolder !== h) {
+        return { acquired: false, reason: 'lost_race' };
+    }
+    return { acquired: true };
+}
+
+async function releaseLock(lockKey, holder) {
+    const key = String(lockKey || '').trim();
+    const h = String(holder || '').trim();
+    if (!key) throw new Error('Missing lockKey');
+    if (!h) throw new Error('Missing holder');
+
+    const now = DateTime.utc().toISO();
+    const { rowIndex, row } = await findLockRow(key);
+    if (!rowIndex || !row) return { released: false, reason: 'missing' };
+
+    const currentHolder = String(row[2] || '');
+    if (currentHolder !== h) {
+        return { released: false, reason: 'not_holder' };
+    }
+
+    const rowData = [key, now, h, now];
+    await updateSheetRange(`${LOCKS_SHEET}!A${rowIndex}:D${rowIndex}`, [rowData]);
+    return { released: true };
+}
+
 async function findEventMappingByGraphId(outlookUpn, graphEventId) {
+    const normalizedUpn = normalizeUpn(outlookUpn);
     const nowMs = Date.now();
     if (!eventMapCache.rows || nowMs - eventMapCache.loadedAtMs > CACHE_TTL_MS) {
         const [rows, header] = await Promise.all([
@@ -357,7 +541,7 @@ async function findEventMappingByGraphId(outlookUpn, graphEventId) {
     const needle = `gid=${graphEventId}`;
     let rowIndex = -1;
     const existingEntry = rows.find((row, idx) => {
-        if (row[upnIndex] === outlookUpn && String(row[statusIndex] || '').includes(needle)) {
+        if (normalizeUpn(row[upnIndex]) === normalizedUpn && String(row[statusIndex] || '').includes(needle)) {
             rowIndex = idx + 2;
             return true;
         }
@@ -367,7 +551,7 @@ async function findEventMappingByGraphId(outlookUpn, graphEventId) {
     if (existingEntry) {
         return {
             rowIndex: rowIndex,
-            outlook_upn: existingEntry[0],
+            outlook_upn: normalizeUpn(existingEntry[0]),
             outlook_event_id: existingEntry[1],
             st_nonjob_ids_json: existingEntry[2],
             last_hash: existingEntry[3],
@@ -389,9 +573,10 @@ async function findEventMappingByGraphId(outlookUpn, graphEventId) {
  * @returns {Promise<void>}
  */
 async function updateEventMapping(outlookUpn, outlookEventId, stNonJobIds, lastHash, status = 'SYNCED', existingRowIndex) {
+    const normalizedUpn = normalizeUpn(outlookUpn);
     const now = DateTime.utc().toISO();
     const rowData = [
-        outlookUpn,
+        normalizedUpn,
         outlookEventId,
         JSON.stringify(stNonJobIds), // Store as JSON string
         lastHash,
@@ -417,7 +602,7 @@ async function updateEventMapping(outlookUpn, outlookEventId, stNonJobIds, lastH
         }
         eventMapCache.loadedAtMs = Date.now();
     }
-    console.log(`Event mapping updated for ${outlookUpn}:${outlookEventId}.`);
+    console.log(`Event mapping updated for ${normalizedUpn}:${outlookEventId}.`);
 }
 
 /**
@@ -455,10 +640,14 @@ module.exports = {
     getTechMap,
     getDeltaState,
     updateDeltaState,
+    tryAcquireLock,
+    releaseLock,
     findEventMapping,
     findEventMappingByGraphId,
     updateEventMapping,
     deleteEventMapping,
     readSheetRows, // Exposed for runFullSyncForAllUsers might need it
+    appendSheetRows,
+    batchUpdateSheetRanges,
     clearSheetRange,
 };
