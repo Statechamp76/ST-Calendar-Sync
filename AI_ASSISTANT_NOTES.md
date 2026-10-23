@@ -4,6 +4,24 @@ Last updated: 2026-02-12 (Firestore migration prep)
 
 This file is the project's "internal memory". When asked about current status, incident runbooks, or how syncing works, consult this file first.
 
+## 2026-10-23 Update: Adaptive Capacity timesheet code
+
+Problem: the Dispatch Board box "Include in scheduling and dispatching capacity" is the timesheet
+flag (legacy "Needs a Timesheet"). Adaptive Capacity's planning view only deducts a non-job event
+that carries a timesheet code, so synced blocks showed techs as available (Matt Brennan, 2026-10-22).
+`removeTechnicianFromCapacityPlanning: true` is still sent; the Capacity API honours that flag.
+
+What changed:
+- `src/services/mapping.js` sends `timesheetCodeId` = `ST_TIMESHEET_CODE_ID` on create and update
+  when the env var is a positive integer; otherwise the field is omitted (old behaviour).
+- Value in use: `ST_TIMESHEET_CODE_ID=642061206` = ServiceTitan timesheet code "Calendar Block"
+  (type Unpaid, applicable to Technician, created 2026-10-23). Unpaid on purpose: the tenant uses
+  timesheets for payroll and a paid code would create pay entries for every meeting.
+- Existing blocks only get the code when the Outlook event next changes; a one-off API backfill
+  (PUT each active sync-created non-job from today forward) was run after the env var went live.
+
+Rollback: remove `ST_TIMESHEET_CODE_ID` from the Cloud Run service; new writes omit the code again.
+
 ## 2026-02-12 Update: AI Inbox/Outbox Processor
 
 What changed:

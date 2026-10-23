@@ -27,8 +27,8 @@ test('mapEventToServiceTitanPayloads maps single block event', () => {
   assert.equal(payloads[0].removeTechnicianFromCapacityPlanning, true);
 });
 
-test('mapEventToServiceTitanPayloads always disables timesheet requirement', () => {
-  process.env.ST_REQUIRE_TIMESHEET = 'true';
+test('mapEventToServiceTitanPayloads sends ST_TIMESHEET_CODE_ID when set', () => {
+  process.env.ST_TIMESHEET_CODE_ID = '642061206';
   const userConfig = {
     st_technician_id: '100',
     st_timesheet_code_id: '200',
@@ -42,8 +42,30 @@ test('mapEventToServiceTitanPayloads always disables timesheet requirement', () 
   };
 
   const payloads = mapEventToServiceTitanPayloads(event, userConfig);
-  assert.ok(!('timesheetCodeId' in payloads[0]));
-  delete process.env.ST_REQUIRE_TIMESHEET;
+  assert.equal(payloads[0].timesheetCodeId, 642061206);
+  assert.equal(payloads[0].removeTechnicianFromCapacityPlanning, true);
+  delete process.env.ST_TIMESHEET_CODE_ID;
+});
+
+test('mapEventToServiceTitanPayloads omits timesheet when ST_TIMESHEET_CODE_ID is blank or invalid', () => {
+  const userConfig = {
+    st_technician_id: '100',
+    st_timesheet_code_id: '200',
+  };
+  const event = {
+    subject: 'Maintenance',
+    isPrivate: false,
+    showAs: 'busy',
+    start: '2026-02-10T16:00:00.000Z',
+    end: '2026-02-10T17:30:00.000Z',
+  };
+
+  for (const value of ['', '0', 'abc']) {
+    process.env.ST_TIMESHEET_CODE_ID = value;
+    const payloads = mapEventToServiceTitanPayloads(event, userConfig);
+    assert.ok(!('timesheetCodeId' in payloads[0]), `value=${JSON.stringify(value)}`);
+  }
+  delete process.env.ST_TIMESHEET_CODE_ID;
 });
 
 test('mapEventToServiceTitanPayloads masks private event subject', () => {

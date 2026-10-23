@@ -23,11 +23,15 @@ function mapEventToServiceTitanPayloads(event, userConfig) {
   const subject = getMaskedSubject(event);
   const eventBlocks = splitMultiDayEvent(event.start, event.end);
 
-  // Policy: Outlook is the source of truth; these blocks are always non-timesheet and always visible
-  // on the technician mobile schedule.
+  // Policy: Outlook is the source of truth; these blocks are always visible on the technician
+  // mobile schedule.
   const showOnTechnicianSchedule = true;
-  // NOTE: Some ServiceTitan tenants reject a numeric 0 timesheet code. To keep "Needs a Timesheet?"
-  // unchecked, we omit `timesheetCodeId` entirely.
+  // Adaptive Capacity (the Dispatch Board's "Include in scheduling and dispatching capacity" box)
+  // only deducts a non-job event that carries a timesheet code. ST_TIMESHEET_CODE_ID is the
+  // dedicated unpaid "Calendar Block" code. When it is unset we omit `timesheetCodeId` entirely
+  // (some tenants reject a numeric 0), which leaves the box unchecked.
+  const timesheetCodeId = Number.parseInt(String(process.env.ST_TIMESHEET_CODE_ID || '').trim(), 10);
+  const hasTimesheetCode = Number.isFinite(timesheetCodeId) && timesheetCodeId > 0;
 
   // Keep these as configuration knobs; they affect where the blocks show up in ST.
   const clearDispatchBoard = (String(process.env.ST_CLEAR_DISPATCH_BOARD || '').trim().toLowerCase() === 'false') ? false : true;
@@ -41,6 +45,7 @@ function mapEventToServiceTitanPayloads(event, userConfig) {
 
     return {
       technicianId: userConfig.st_technician_id,
+      ...(hasTimesheetCode ? { timesheetCodeId } : {}),
       start: startDateTime.toISO(),
       duration,
       name: subject,
