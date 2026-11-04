@@ -16,7 +16,6 @@ function parseJsonArray(value) {
 function isOurSyncLikeAppointment(appt) {
   // These are the defaults our sync uses. If fields are absent, don't treat as ours.
   if (appt?.showOnTechnicianSchedule !== true) return false;
-  if (appt?.clearDispatchBoard !== true) return false;
   if (appt?.clearTechnicianView !== false) return false;
   if (appt?.removeTechnicianFromCapacityPlanning !== true) return false;
   if (appt?.active !== true) return false;
